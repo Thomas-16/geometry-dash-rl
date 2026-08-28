@@ -27,7 +27,7 @@ target_link_libraries(gdcore PUBLIC ZLIB::ZLIB)
 add_executable(dump tools/dump.cpp)
 target_link_libraries(dump PRIVATE gdcore)
 
-add_executable(viewer src/viewer/main.cpp)
+add_executable(viewer src/viewer/main.cpp src/viewer/atlas.cpp)
 target_link_libraries(viewer PRIVATE gdcore)
 if(MINGW)
   target_link_libraries(viewer PRIVATE raylib opengl32 gdi32 winmm)
