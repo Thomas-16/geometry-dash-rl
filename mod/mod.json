@@ -1,0 +1,11 @@
+{
+    "geode": "5.10.0",
+    "gd": {
+        "win": "2.2081"
+    },
+    "id": "fang.trace-logger",
+    "name": "Trace Logger",
+    "version": "v0.1.0",
+    "developer": "Thomas",
+    "description": "Logs per-physics-tick player state to CSV for sim trace verification."
+}
