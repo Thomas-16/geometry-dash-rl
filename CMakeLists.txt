@@ -31,7 +31,12 @@ target_link_libraries(dump PRIVATE gdcore)
 add_executable(trace_check tools/trace_check.cpp)
 target_link_libraries(trace_check PRIVATE gdcore)
 
-add_executable(viewer src/viewer/main.cpp src/viewer/atlas.cpp)
+add_executable(viewer
+  src/viewer/main.cpp
+  src/viewer/atlas.cpp
+  src/viewer/world.cpp
+  src/viewer/modes.cpp
+)
 target_link_libraries(viewer PRIVATE gdcore)
 if(MINGW)
   target_link_libraries(viewer PRIVATE raylib opengl32 gdi32 winmm)

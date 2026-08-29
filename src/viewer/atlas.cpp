@@ -1,6 +1,7 @@
 #include "atlas.hpp"
 
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 
@@ -55,6 +56,9 @@ bool Atlas::loadSheet(const std::string& plistPath) {
         TraceLog(LOG_WARNING, "atlas: no frames dict in %s", plistPath.c_str());
         return false;
     }
+    // Step past the "frames" key itself, or nextKey() returns it as a frame
+    // name and its fake body swallows the first real frame of the sheet.
+    pos += std::strlen("<key>frames</key>");
 
     const int sheetIndex = (int)sheets_.size();
     size_t added = 0;
