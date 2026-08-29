@@ -5,7 +5,7 @@
     },
     "id": "fang.trace-logger",
     "name": "Trace Logger",
-    "version": "v0.1.0",
+    "version": "v0.2.0",
     "developer": "Thomas",
     "description": "Logs per-physics-tick player state to CSV for sim trace verification."
 }

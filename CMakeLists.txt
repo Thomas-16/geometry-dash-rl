@@ -20,6 +20,7 @@ find_package(ZLIB REQUIRED)
 
 add_library(gdcore STATIC
   src/core/level.cpp
+  src/core/geometry.cpp
 )
 target_include_directories(gdcore PUBLIC src)
 target_link_libraries(gdcore PUBLIC ZLIB::ZLIB)
