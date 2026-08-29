@@ -1,5 +1,6 @@
 build/
 *.png
+assets/
 
 .tools/
 __pycache__/

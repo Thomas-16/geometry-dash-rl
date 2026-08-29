@@ -5,7 +5,9 @@
 // collision truth is gdcore::LevelGeometry (see gd-replica-notes.md).
 //
 // Usage: viewer [level.txt] [--res <ResourcesDir>] [--camx N] [--zoom Z]
-//               [--shot out.png] [--play]
+//               [--shot out.png] [--play] [--music-offset seconds]
+//   --music-offset shifts song time vs sim time (positive = skip the song
+//   ahead, like the game's own ms offset setting; compensates output latency).
 //   --shot renders a few frames (Browse mode), saves a screenshot, and exits
 //   (for automated visual checks).
 // Keys: TAB / 1 / 2 = switch mode (Browse / Play)
@@ -31,7 +33,7 @@ static const char* kDefaultLevel =
 int main(int argc, char** argv) {
     std::string levelPath = kDefaultLevel;
     std::string shotPath, resDirOverride;
-    float camX = 0.0f, zoom = 1.5f;
+    float camX = 0.0f, zoom = 1.5f, musicOffset = 0.0f;
     int startMode = 0;  // 0 = Browse (default, keeps --shot automation), 1 = Play
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) shotPath = argv[++i];
@@ -39,6 +41,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--zoom") && i + 1 < argc) zoom = std::strtof(argv[++i], nullptr);
         else if (!std::strcmp(argv[i], "--res") && i + 1 < argc) resDirOverride = argv[++i];
         else if (!std::strcmp(argv[i], "--play")) startMode = 1;
+        else if (!std::strcmp(argv[i], "--music-offset") && i + 1 < argc) musicOffset = std::strtof(argv[++i], nullptr);
         else levelPath = argv[i];
     }
 
@@ -84,7 +87,16 @@ int main(int argc, char** argv) {
     std::filesystem::path resDir = resDirOverride.empty()
                                        ? std::filesystem::path(levelPath).parent_path().parent_path()
                                        : std::filesystem::path(resDirOverride);
-    app.music = LoadMusicStream((resDir / "StereoMadness.mp3").string().c_str());
+    // Smaller stream buffer: less output latency and a finer
+    // GetMusicTimePlayed, both matter for the sim<->song sync.
+    SetAudioStreamBufferSizeDefault(1024);
+    // Local copy first (assets/ is gitignored — RobTop's content), GD install
+    // as fallback.
+    app.musicOffset = musicOffset;
+    const char* localSong = "assets/StereoMadness.mp3";
+    app.music = LoadMusicStream(std::filesystem::exists(localSong)
+                                    ? localSong
+                                    : (resDir / "StereoMadness.mp3").string().c_str());
     app.musicLoaded = IsMusicValid(app.music);
     if (app.musicLoaded) app.music.looping = false;
     else TraceLog(LOG_WARNING, "StereoMadness.mp3 unavailable — playing silent");

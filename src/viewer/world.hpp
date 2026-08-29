@@ -58,6 +58,7 @@ struct App {
     float iconScale = 1.0f;     // scales the icon sprite to span 30 units
     Music music{};              // StereoMadness.mp3 stream (owned by main)
     bool musicLoaded = false;
+    float musicOffset = 0.0f;   // song time = sim time + offset (--music-offset)
 };
 
 // ClearBackground + screen-space parallax background. camX drives both the

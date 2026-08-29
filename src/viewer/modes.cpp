@@ -60,13 +60,9 @@ void PlayMode::resetAttempt(App& app) {
     cubeRot_ = 0.0f;
     deathTimer_ = 0.0f;
     camY_ = 0.0f;
-    // Every attempt starts at x=0 (no checkpoints), so the song always
-    // restarts from 0:00 — same as the real game.
-    if (app.musicLoaded) {
-        StopMusicStream(app.music);
-        SeekMusicStream(app.music, 0.0f);
-        PlayMusicStream(app.music);
-    }
+    // Every attempt starts at x=0 (no checkpoints), so the song restarts —
+    // same as the real game. update() starts playback at the right position.
+    if (app.musicLoaded) StopMusicStream(app.music);
 }
 
 void PlayMode::enter(App& app) {
@@ -116,15 +112,22 @@ void PlayMode::update(App& app) {
         // tick_ is the authoritative clock; the accumulator clamp above can
         // let sim time fall behind wall time, so resnap the song once a
         // second when it drifts audibly.
-        if (app.musicLoaded && tick_ % 240 == 0) {
-            float simT = (float)(tick_ / 240.0);
-            if (std::fabs(GetMusicTimePlayed(app.music) - simT) > 0.1f)
-                SeekMusicStream(app.music, simT);
+        if (app.musicLoaded && tick_ % 240 == 0 && IsMusicStreamPlaying(app.music)) {
+            float target = (float)(tick_ / 240.0) + app.musicOffset;
+            if (target >= 0.0f && std::fabs(GetMusicTimePlayed(app.music) - target) > 0.1f)
+                SeekMusicStream(app.music, target);
         }
     }
     if (player_.dead) {
         deathTimer_ = 0.9f;
         if (app.musicLoaded) StopMusicStream(app.music);
+    } else if (app.musicLoaded && !IsMusicStreamPlaying(app.music)) {
+        // Attempt (re)start, or delayed start under a negative --music-offset.
+        float target = (float)(tick_ / 240.0) + app.musicOffset;
+        if (target >= 0.0f && target < GetMusicTimeLength(app.music)) {
+            PlayMusicStream(app.music);
+            SeekMusicStream(app.music, target);
+        }
     }
 
     // Cosmetic spin: ~half turn per full hop (airtime ≈ 0.43s at these
