@@ -190,14 +190,17 @@ static bool drawTexturedObject(const gdv::Atlas& atlas, const gd::Object& o) {
     const gdv::RenderSpec* spec = gdv::renderSpec(o.id);
     if (!spec) return false;
     float scale = propFloat(o, 32, 1.0f);
+    Color tint = spec->tint == gdv::Tint::Black ? BLACK : WHITE;
+    if (spec->tint == gdv::Tint::Glow) BeginBlendMode(BLEND_ADDITIVE);
     bool drewAny = false, missing = false;
     for (const char* name : spec->layers) {
         if (!name) continue;
         const gdv::AtlasFrame* f = atlas.find(name);
         if (!f) { missing = true; continue; }
-        drawFrame(atlas, *f, o, scale, WHITE);
+        drawFrame(atlas, *f, o, scale, tint);
         drewAny = true;
     }
+    if (spec->tint == gdv::Tint::Glow) EndBlendMode();
     bool hasLayers = spec->layers[0] != nullptr;
     return !hasLayers || (drewAny && !missing);
 }
@@ -403,7 +406,26 @@ int main(int argc, char** argv) {
             // visible world x-range for grid lines
             Vector2 tl = GetScreenToWorld2D({0, 0}, cam);
             Vector2 br = GetScreenToWorld2D({(float)GetScreenWidth(), (float)GetScreenHeight()}, cam);
-            // ground: floor surface is world y=0 (screen y=0), drawn solid below
+            // grid (30-unit spacing), faint
+            for (float gx = std::floor(tl.x / 30) * 30; gx <= br.x; gx += 30)
+                DrawLineEx({gx, tl.y}, {gx, br.y}, 1.0f / cam.zoom, Color{255, 255, 255, 10});
+            for (float gy = std::floor(tl.y / 30) * 30; gy <= br.y; gy += 30)
+                DrawLineEx({tl.x, gy}, {br.x, gy}, 1.0f / cam.zoom, Color{255, 255, 255, 10});
+
+            for (const gd::Object* o : drawOrder) {
+                if (useTextures) {
+                    bool handled = drawTexturedObject(atlas, *o);
+                    if (!handled) drawObjectShapes(*o);
+                    else if (debugMarkers && !gdv::renderSpec(o->id)->layers[0])
+                        drawObjectShapes(*o);  // invisible objects: show marker
+                } else {
+                    drawObjectShapes(*o);
+                }
+            }
+
+            // Ground after objects: the game's ground layer sits at a higher z
+            // than the object layer (OpenGD PlayLayer addChild z=100), so
+            // anything dipping below y=0 is covered by it.
             if (useTextures && groundTex.id) {
                 // 512 px = 128 units at uhd scale; scrolls 1:1 with the world.
                 float gh = groundTex.height * kUnitsPerPx;
@@ -420,23 +442,7 @@ int main(int argc, char** argv) {
                 DrawRectangleV({tl.x, 0}, {br.x - tl.x, std::max(0.0f, br.y)},
                                Color{40, 44, 80, 255});
             }
-            // grid (30-unit spacing), faint
-            for (float gx = std::floor(tl.x / 30) * 30; gx <= br.x; gx += 30)
-                DrawLineEx({gx, tl.y}, {gx, br.y}, 1.0f / cam.zoom, Color{255, 255, 255, 10});
-            for (float gy = std::floor(tl.y / 30) * 30; gy <= br.y; gy += 30)
-                DrawLineEx({tl.x, gy}, {br.x, gy}, 1.0f / cam.zoom, Color{255, 255, 255, 10});
             DrawLineEx({tl.x, 0}, {br.x, 0}, 2.0f / cam.zoom, lineColor);
-
-            for (const gd::Object* o : drawOrder) {
-                if (useTextures) {
-                    bool handled = drawTexturedObject(atlas, *o);
-                    if (!handled) drawObjectShapes(*o);
-                    else if (debugMarkers && !gdv::renderSpec(o->id)->layers[0])
-                        drawObjectShapes(*o);  // invisible objects: show marker
-                } else {
-                    drawObjectShapes(*o);
-                }
-            }
         }
         EndMode2D();
 
