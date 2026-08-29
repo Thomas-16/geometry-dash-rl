@@ -51,7 +51,7 @@ void BrowseMode::draw(const App& app) {
 
 // ------------------------------------------------------------------ PlayMode
 
-void PlayMode::resetAttempt() {
+void PlayMode::resetAttempt(App& app) {
     // Full default-construct: also clears the landing-snap memory, so every
     // attempt is bit-identical to a fresh run. Never partially reset.
     player_ = gdcore::PlayerState{};
@@ -60,28 +60,39 @@ void PlayMode::resetAttempt() {
     cubeRot_ = 0.0f;
     deathTimer_ = 0.0f;
     camY_ = 0.0f;
+    // Every attempt starts at x=0 (no checkpoints), so the song always
+    // restarts from 0:00 — same as the real game.
+    if (app.musicLoaded) {
+        StopMusicStream(app.music);
+        SeekMusicStream(app.music, 0.0f);
+        PlayMusicStream(app.music);
+    }
 }
 
-void PlayMode::enter(App&) {
+void PlayMode::enter(App& app) {
     // ~1 physics tick per frame, so hold/release edges quantize to 1/240s
     // instead of 1/60s. Purely an input-resolution improvement.
     SetTargetFPS(240);
     attempt_ = 1;
     won_ = false;
-    resetAttempt();
+    resetAttempt(app);
+}
+
+void PlayMode::exit(App& app) {
+    if (app.musicLoaded) StopMusicStream(app.music);
 }
 
 void PlayMode::update(App& app) {
     if (won_) {
-        if (IsKeyPressed(KEY_R)) { attempt_ = 1; won_ = false; resetAttempt(); }
+        if (IsKeyPressed(KEY_R)) { attempt_ = 1; won_ = false; resetAttempt(app); }
         return;
     }
     if (player_.dead) {
         deathTimer_ -= GetFrameTime();
-        if (deathTimer_ <= 0.0f) { ++attempt_; resetAttempt(); }
+        if (deathTimer_ <= 0.0f) { ++attempt_; resetAttempt(app); }
         return;
     }
-    if (IsKeyPressed(KEY_R)) { attempt_ = 1; resetAttempt(); return; }
+    if (IsKeyPressed(KEY_R)) { attempt_ = 1; resetAttempt(app); return; }
 
     // Input is polled per render frame, so at F fps every 240/F physics ticks
     // in this frame see the same hold state — press/release edges quantize to
@@ -102,8 +113,19 @@ void PlayMode::update(App& app) {
         accum_ -= kTick;
         ++tick_;
         if (player_.x >= app.maxX + 300.0f) won_ = true;
+        // tick_ is the authoritative clock; the accumulator clamp above can
+        // let sim time fall behind wall time, so resnap the song once a
+        // second when it drifts audibly.
+        if (app.musicLoaded && tick_ % 240 == 0) {
+            float simT = (float)(tick_ / 240.0);
+            if (std::fabs(GetMusicTimePlayed(app.music) - simT) > 0.1f)
+                SeekMusicStream(app.music, simT);
+        }
     }
-    if (player_.dead) deathTimer_ = 0.9f;
+    if (player_.dead) {
+        deathTimer_ = 0.9f;
+        if (app.musicLoaded) StopMusicStream(app.music);
+    }
 
     // Cosmetic spin: ~half turn per full hop (airtime ≈ 0.43s at these
     // constants). Snaps upright on the ground. Never feeds back into physics.

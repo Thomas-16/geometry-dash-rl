@@ -77,12 +77,18 @@ int main(int argc, char** argv) {
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     InitWindow(W, H, "gd-rl viewer — Stereo Madness");
     SetTargetFPS(60);
+    InitAudioDevice();
 
     // Resources dir: explicit --res, else derived from the level path
     // (Resources/levels/1.txt -> Resources).
     std::filesystem::path resDir = resDirOverride.empty()
                                        ? std::filesystem::path(levelPath).parent_path().parent_path()
                                        : std::filesystem::path(resDirOverride);
+    app.music = LoadMusicStream((resDir / "StereoMadness.mp3").string().c_str());
+    app.musicLoaded = IsMusicValid(app.music);
+    if (app.musicLoaded) app.music.looping = false;
+    else TraceLog(LOG_WARNING, "StereoMadness.mp3 unavailable — playing silent");
+
     app.textured = app.atlas.loadSheet((resDir / "GJ_GameSheet-uhd.plist").string()) &&
                    app.atlas.loadSheet((resDir / "GJ_GameSheet02-uhd.plist").string());
     if (app.textured) {
@@ -137,11 +143,12 @@ int main(int argc, char** argv) {
         if (IsKeyPressed(KEY_TAB)) want = (cur + 1) % kModeCount;
         if (IsKeyPressed(KEY_ONE)) want = 0;
         if (IsKeyPressed(KEY_TWO)) want = 1;
-        if (want != cur) { cur = want; modes[cur]->enter(app); }
+        if (want != cur) { modes[cur]->exit(app); cur = want; modes[cur]->enter(app); }
         if (IsKeyPressed(KEY_T) && app.textured) app.useTextures = !app.useTextures;
         if (IsKeyPressed(KEY_D)) app.debugMarkers = !app.debugMarkers;
         if (IsKeyPressed(KEY_F11)) ToggleBorderlessWindowed();
 
+        if (app.musicLoaded) UpdateMusicStream(app.music);
         modes[cur]->update(app);
 
         BeginDrawing();
@@ -158,6 +165,8 @@ int main(int argc, char** argv) {
     }
     if (app.bgTex.id) UnloadTexture(app.bgTex);
     if (app.groundTex.id) UnloadTexture(app.groundTex);
+    if (app.musicLoaded) UnloadMusicStream(app.music);
+    CloseAudioDevice();
     app.atlas.unloadAll();
     CloseWindow();
     return 0;

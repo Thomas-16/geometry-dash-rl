@@ -12,6 +12,7 @@ public:
     virtual ~Mode() = default;
     virtual const char* name() const = 0;
     virtual void enter(App&) {}         // called on switch-in
+    virtual void exit(App&) {}          // called on switch-away
     virtual void update(App&) = 0;      // input + sim, once per render frame
     virtual void draw(const App&) = 0;  // inside Begin/EndDrawing
 };
@@ -33,11 +34,12 @@ class PlayMode : public Mode {
 public:
     const char* name() const override { return "Play"; }
     void enter(App&) override;
+    void exit(App&) override;
     void update(App&) override;
     void draw(const App&) override;
 
 private:
-    void resetAttempt();
+    void resetAttempt(App&);
 
     gdcore::PhysicsConfig cfg_ = gdcore::stereoMadnessCube();
     gdcore::PlayerState player_{};

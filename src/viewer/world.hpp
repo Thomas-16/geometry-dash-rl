@@ -56,6 +56,8 @@ struct App {
     const AtlasFrame* playerFrame1 = nullptr;  // player_01_001.png (primary)
     const AtlasFrame* playerFrame2 = nullptr;  // player_01_2_001.png (secondary)
     float iconScale = 1.0f;     // scales the icon sprite to span 30 units
+    Music music{};              // StereoMadness.mp3 stream (owned by main)
+    bool musicLoaded = false;
 };
 
 // ClearBackground + screen-space parallax background. camX drives both the
