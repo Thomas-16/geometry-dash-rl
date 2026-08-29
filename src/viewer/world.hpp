@@ -55,6 +55,8 @@ struct App {
     bool debugMarkers = false;  // D toggle
     const AtlasFrame* playerFrame1 = nullptr;  // player_01_001.png (primary)
     const AtlasFrame* playerFrame2 = nullptr;  // player_01_2_001.png (secondary)
+    const AtlasFrame* shipFrame1 = nullptr;    // ship_01_001.png (primary)
+    const AtlasFrame* shipFrame2 = nullptr;    // ship_01_2_001.png (secondary)
     float iconScale = 1.0f;     // scales the icon sprite to span 30 units
     Music music{};              // StereoMadness.mp3 stream (owned by main)
     bool musicLoaded = false;
@@ -70,8 +72,11 @@ void drawBackground(const App& app, float camX);
 // draw order (ground layer z=100 covers anything dipping below y=0). It is
 // the hook for player/ghost rendering; a training view passes a callback
 // that draws N players.
+// ceilingY > 0 also draws the flying-mode ceiling (an upside-down ground
+// strip) with its underside at that engine y (ship band: 390).
 void drawWorld(const App& app, const Camera2D& cam, float colorX,
-               const std::function<void()>& drawActors = {});
+               const std::function<void()>& drawActors = {},
+               float ceilingY = 0.0f);
 
 // Draws one atlas frame at an arbitrary world point (screen coords, y-down),
 // no flips. Rotation is clockwise degrees, like the object path.

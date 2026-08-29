@@ -263,7 +263,7 @@ void drawBackground(const App& app, float camX) {
 }
 
 void drawWorld(const App& app, const Camera2D& cam, float colorX,
-               const std::function<void()>& drawActors) {
+               const std::function<void()>& drawActors, float ceilingY) {
     Color groundCol = app.groundTrack.eval(colorX);
     BeginMode2D(cam);
     {
@@ -309,6 +309,32 @@ void drawWorld(const App& app, const Camera2D& cam, float colorX,
                            Color{40, 44, 80, 255});
         }
         DrawLineEx({tl.x, 0}, {br.x, 0}, 2.0f / cam.zoom, app.lineColor);
+
+        // Flying-mode ceiling: the game's inverted ground strip, underside at
+        // engine ceilingY (world y = -(ceilingY - 90)).
+        if (ceilingY > 0.0f) {
+            float cy = -(ceilingY - 90.0f);
+            if (app.useTextures && app.groundTex.id) {
+                float gh = app.groundTex.height * kUnitsPerPx;
+                // negative source height flips the strip vertically
+                DrawTexturePro(app.groundTex,
+                               {tl.x / kUnitsPerPx, (float)app.groundTex.height,
+                                (br.x - tl.x) / kUnitsPerPx,
+                                -(float)app.groundTex.height},
+                               {tl.x, cy - gh, br.x - tl.x, gh}, {0, 0}, 0,
+                               groundCol);
+                if (tl.y < cy - gh)
+                    DrawRectangleV({tl.x, tl.y}, {br.x - tl.x, cy - gh - tl.y},
+                                   Color{(unsigned char)(groundCol.r / 2),
+                                         (unsigned char)(groundCol.g / 2),
+                                         (unsigned char)(groundCol.b / 2), 255});
+            } else {
+                DrawRectangleV({tl.x, tl.y},
+                               {br.x - tl.x, std::max(0.0f, cy - tl.y)},
+                               Color{40, 44, 80, 255});
+            }
+            DrawLineEx({tl.x, cy}, {br.x, cy}, 2.0f / cam.zoom, app.lineColor);
+        }
     }
     EndMode2D();
 }
@@ -337,7 +363,25 @@ void drawFrameAt(const Atlas& atlas, const AtlasFrame& f, Vector2 worldCenter,
 
 void drawPlayer(const App& app, const gdcore::PlayerState& s, float rotationDeg) {
     Vector2 c{s.x, -(s.y - 90.0f)};
-    if (app.useTextures && app.playerFrame1) {
+    if (app.useTextures && s.ship && app.shipFrame1) {
+        // Ship: the cube rides inside at 0.55 scale, 5 units above center
+        // (PlayerObject::createShip), then the ship hull draws over it. Both
+        // rotate together around the player center.
+        float t = rotationDeg * DEG2RAD;
+        Vector2 cc{c.x + 5.0f * std::sin(t), c.y - 5.0f * std::cos(t)};
+        if (app.playerFrame1) {
+            if (app.playerFrame2)
+                drawFrameAt(app.atlas, *app.playerFrame2, cc, rotationDeg,
+                            app.iconScale * 0.55f, Color{0, 255, 255, 255});
+            drawFrameAt(app.atlas, *app.playerFrame1, cc, rotationDeg,
+                        app.iconScale * 0.55f, Color{0, 255, 0, 255});
+        }
+        if (app.shipFrame2)
+            drawFrameAt(app.atlas, *app.shipFrame2, c, rotationDeg,
+                        app.iconScale, Color{0, 255, 255, 255});
+        drawFrameAt(app.atlas, *app.shipFrame1, c, rotationDeg,
+                    app.iconScale, Color{0, 255, 0, 255});
+    } else if (app.useTextures && app.playerFrame1) {
         // Default cube: secondary (cyan) layer under primary (green).
         if (app.playerFrame2)
             drawFrameAt(app.atlas, *app.playerFrame2, c, rotationDeg,

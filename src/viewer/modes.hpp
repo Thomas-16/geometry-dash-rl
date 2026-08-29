@@ -51,6 +51,7 @@ private:
     float camY_ = 0.0f;        // engine y of the screen bottom (band follow)
     bool won_ = false;
     float cubeRot_ = 0.0f;     // cosmetic-only spin, never physics
+    float shipRot_ = 0.0f;     // cosmetic ship tilt (updateShipRotation-style)
 };
 
 }  // namespace gdv

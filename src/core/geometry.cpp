@@ -34,22 +34,29 @@ const HitboxSpec* findSpec(int id) {
 
 LevelGeometry LevelGeometry::build(const gd::Level& level) {
     LevelGeometry g;
+    int order = 0;
     for (const auto& obj : level.objects) {
+        ++order;
+        bool portal = obj.id == 12 || obj.id == 13;
         const HitboxSpec* spec = findSpec(obj.id);
-        if (!spec) continue;
-        float w = spec->w;
-        float h = spec->h;
+        if (!spec && !portal) continue;
+        float w = portal ? 34.0f : spec->w;
+        float h = portal ? 86.0f : spec->h;
         // odd multiples of 90 degrees swap the box extents
         int rot = static_cast<int>(std::lround(obj.rotation));
         if (((rot % 180) + 180) % 180 == 90) std::swap(w, h);
         float cx = obj.x;
         float cy = obj.y + 90.0f; // level -> engine y
-        Box b{cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f};
-        (spec->kind == 's' ? g.solids : g.hazards).push_back(b);
+        Box b{cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f,
+              order};
+        if (portal) g.portals.push_back(Portal{b, obj.id == 13});
+        else (spec->kind == 's' ? g.solids : g.hazards).push_back(b);
     }
     auto byLeft = [](const Box& a, const Box& b) { return a.left < b.left; };
     std::sort(g.solids.begin(), g.solids.end(), byLeft);
     std::sort(g.hazards.begin(), g.hazards.end(), byLeft);
+    std::sort(g.portals.begin(), g.portals.end(),
+              [](const Portal& a, const Portal& b) { return a.box.left < b.box.left; });
     return g;
 }
 

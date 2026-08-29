@@ -15,6 +15,7 @@
 #include "core/level.hpp"
 #include "core/physics.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -65,7 +66,8 @@ std::vector<Row> loadTrace(const char* path) {
     return rows;
 }
 
-int checkTrace(const char* path, const gdcore::LevelGeometry& geom) {
+int checkTrace(const char* path, const gdcore::LevelGeometry& geom,
+               float maxObjX) {
     auto rows = loadTrace(path);
     if (rows.size() < 2) {
         std::fprintf(stderr, "%s: too few rows\n", path);
@@ -79,16 +81,33 @@ int checkTrace(const char* path, const gdcore::LevelGeometry& geom) {
     s.yvel = rows[0].yvel;
     s.onGround = rows[0].onground != 0;
     s.holding = rows[0].holding != 0;
+    s.ship = rows[0].ship != 0;
 
     uint64_t matched = 0;
     for (size_t i = 1; i < rows.size(); ++i) {
         const Row& r = rows[i];
-        if (r.ship) {
-            std::printf("%s: MATCHED %llu ticks up to ship portal at tick %llu\n",
-                path, (unsigned long long)matched, (unsigned long long)r.tick);
+        // Past the level's last object the real game hands the player to the
+        // end-of-level auto-walk (observed trigger: last object + ~40 units;
+        // physics freezes and yvel stops updating). In gameplay x advances
+        // every tick, so the first frozen-x row past the last object marks
+        // the takeover exactly; comparison must be bit-exact until then.
+        if (r.realx > maxObjX && r.realx == rows[i - 1].realx && !r.dead) {
+            std::printf(
+                "%s: MATCHED all %llu gameplay ticks — LEVEL COMPLETE "
+                "(end sequence from tick %llu, x=%.9g)\n",
+                path, (unsigned long long)matched,
+                (unsigned long long)r.tick, r.realx);
             return 0;
         }
         gdcore::step(s, cfg, geom, r.holding != 0);
+        if (s.ship != (r.ship != 0)) {
+            std::printf(
+                "%s: MODE MISMATCH at tick %llu after %llu matched ticks: "
+                "sim ship=%d real ship=%d (x=%.9g y=%.9g)\n",
+                path, (unsigned long long)r.tick, (unsigned long long)matched,
+                (int)s.ship, r.ship, s.x, s.y);
+            return 1;
+        }
         if (s.x != r.realx || s.y != r.realy) {
             std::printf(
                 "%s: DIVERGED at tick %llu after %llu matched ticks\n"
@@ -129,13 +148,16 @@ int main(int argc, char** argv) {
     const char* levelPath = std::getenv("GD_LEVEL_PATH");
     if (!levelPath) levelPath = kDefaultLevel;
     gdcore::LevelGeometry geom;
+    float maxObjX = 0.0f;
     try {
-        geom = gdcore::LevelGeometry::build(gd::Level::loadFromFile(levelPath));
+        gd::Level level = gd::Level::loadFromFile(levelPath);
+        geom = gdcore::LevelGeometry::build(level);
+        for (const auto& obj : level.objects) maxObjX = std::max(maxObjX, obj.x);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "failed to load level %s: %s\n", levelPath, e.what());
         return 2;
     }
     int rc = 0;
-    for (int i = 1; i < argc; ++i) rc |= checkTrace(argv[i], geom);
+    for (int i = 1; i < argc; ++i) rc |= checkTrace(argv[i], geom, maxObjX);
     return rc;
 }

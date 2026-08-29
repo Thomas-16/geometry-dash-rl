@@ -129,6 +129,14 @@ int main(int argc, char** argv) {
         } else {
             TraceLog(LOG_WARNING, "player icon sheet unavailable — rect player");
         }
+        // Ship icon sheet (default ship). Missing sheet just means the ship
+        // sections render the cube sprite.
+        if (app.atlas.loadSheet((resDir / "icons" / "ship_01-uhd.plist").string())) {
+            app.shipFrame1 = app.atlas.find("ship_01_001.png");
+            app.shipFrame2 = app.atlas.find("ship_01_2_001.png");
+        } else {
+            TraceLog(LOG_WARNING, "ship icon sheet unavailable — cube-only player");
+        }
     } else {
         TraceLog(LOG_WARNING, "atlases unavailable — falling back to shape rendering");
         app.atlas.unloadAll();

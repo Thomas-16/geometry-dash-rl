@@ -58,6 +58,7 @@ void PlayMode::resetAttempt(App& app) {
     accum_ = 0.0;
     tick_ = 0;
     cubeRot_ = 0.0f;
+    shipRot_ = 0.0f;
     deathTimer_ = 0.0f;
     camY_ = 0.0f;
     // Every attempt starts at x=0 (no checkpoints), so the song restarts —
@@ -108,7 +109,19 @@ void PlayMode::update(App& app) {
         gdcore::step(player_, cfg_, app.geom, hold);
         accum_ -= kTick;
         ++tick_;
-        if (player_.x >= app.maxX + 300.0f) won_ = true;
+        if (player_.ship) {
+            // Cosmetic tilt toward the velocity direction, like
+            // updateShipRotation: slerp 0.15/tick toward atan2(dy, dx).
+            float dy = static_cast<float>(player_.yvel) * cfg_.yFactor;
+            float target = std::atan2(-dy, cfg_.dx) * RAD2DEG;
+            shipRot_ += (target - shipRot_) * 0.15f;
+        } else {
+            shipRot_ = 0.0f;
+        }
+        // Real completion trigger: the session6 full-run trace shows normal
+        // physics ending at last-object + ~40 units (x froze at +40.49; the
+        // end-of-level auto-walk takes over from there).
+        if (player_.x >= app.maxX + 40.0f) won_ = true;
         // tick_ is the authoritative clock; the accumulator clamp above can
         // let sim time fall behind wall time, so resnap the song once a
         // second when it drifts audibly.
@@ -147,9 +160,15 @@ void PlayMode::draw(const App& app) {
     // below the camera top, and never sinks below the ground (camY >= 0).
     // camY_ is the engine y of the screen bottom; ground top (engine 90) sits
     // 90 units above it at rest.
-    if (player_.y - camY_ < 120.0f) camY_ = player_.y - 120.0f;
-    else if (player_.y - camY_ > 320.0f - 90.0f) camY_ = player_.y - (320.0f - 90.0f);
-    if (camY_ < 0.0f) camY_ = 0.0f;
+    if (player_.ship) {
+        // Ship band: floor 90 / ceiling 390 both on screen; ease the camera
+        // toward the band centered vertically (80 = 90 - (320-300)/2).
+        camY_ += (80.0f - camY_) * std::min(1.0f, 6.0f * GetFrameTime());
+    } else {
+        if (player_.y - camY_ < 120.0f) camY_ = player_.y - 120.0f;
+        else if (player_.y - camY_ > 320.0f - 90.0f) camY_ = player_.y - (320.0f - 90.0f);
+        if (camY_ < 0.0f) camY_ = 0.0f;
+    }
     cam_.zoom = GetScreenHeight() / 320.0f;
     cam_.offset = {GetScreenWidth() / 2.5f, (float)GetScreenHeight()};
     // world y = -(engine y - 90); target sits at the screen bottom (offset.y=H)
@@ -157,7 +176,8 @@ void PlayMode::draw(const App& app) {
 
     drawBackground(app, player_.x);
     drawWorld(app, cam_, player_.x,
-              [&] { drawPlayer(app, player_, cubeRot_); });
+              [&] { drawPlayer(app, player_, player_.ship ? shipRot_ : cubeRot_); },
+              player_.ship ? 390.0f : 0.0f);
 
     float progress = app.maxX > 0 ? std::min(1.0f, player_.x / app.maxX) : 0.0f;
     DrawText(TextFormat("Attempt %d   x: %.0f / %.0f  (%d%%)   %d fps%s",

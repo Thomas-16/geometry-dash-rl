@@ -55,11 +55,17 @@ struct Tracer {
     uint64_t tick = 0;
     bool holding = false;
     int attempt = 0;
+    // Set after levelComplete's flush: the game keeps ticking through the
+    // end-of-level animation, and without this the leftover rows would be
+    // re-flushed by onQuit under the SAME attempt number, overwriting the
+    // completed run's file (lost session5 attempt_0002 this way).
+    bool stopped = false;
 
     void start() {
         flush();
         ++attempt;
         tick = 0;
+        stopped = false;
         rows.clear();
         rows.reserve(1 << 16);
         collisions.clear();
@@ -104,6 +110,7 @@ struct Tracer {
 Tracer g_tracer;
 
 void logRow(uint8_t src, PlayerObject* p, float dt, bool halfTick, bool lastTick) {
+    if (g_tracer.stopped) return;
     g_tracer.rows.push_back(TickRow{
         src,
         g_tracer.tick,
@@ -225,6 +232,7 @@ class $modify(TraceBGL, GJBaseGameLayer) {
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         // Only trace real gameplay, not editor playtest
         if (PlayLayer::get() != static_cast<GJBaseGameLayer*>(this)) return;
+        if (g_tracer.stopped) return;
         auto* p = m_player1;
         if (!p) return;
         logRow(0, p, dt, isHalfTick, isLastTick);
@@ -327,6 +335,7 @@ class $modify(TracePL, PlayLayer) {
     void levelComplete() {
         PlayLayer::levelComplete();
         g_tracer.flush();
+        g_tracer.stopped = true;
     }
 
     void onQuit() {
