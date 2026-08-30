@@ -1,6 +1,8 @@
 // RL visualization modes: ReplayMode re-simulates .gdtrace episodes (per-tick
 // hold bits; exact by determinism) as tinted ghosts, TrainingViewMode renders
 // a live snapshot of every training env from the trainer's live.bin.
+// Both open their files through an in-viewer Picker (O key) that scans runs/,
+// so no command-line flag is required to reach them.
 #pragma once
 
 #include "viewer/modes.hpp"
@@ -10,6 +12,40 @@
 #include <vector>
 
 namespace gdv {
+
+struct PickEntry {
+    std::string label;  // shown in the list
+    std::string path;   // returned on select
+};
+
+// Modal list overlay: arrows/wheel move, Enter/click selects, Esc closes.
+// update() handles input and returns the selected path (empty = none yet);
+// draw() renders. While open, the owning mode should swallow its own keys.
+class Picker {
+public:
+    void open(std::string title, std::vector<PickEntry> entries);
+    void close() { open_ = false; }
+    bool isOpen() const { return open_; }
+    std::string update();
+    void draw() const;
+
+private:
+    // Shared by update (hit test) and draw.
+    Rectangle panel() const;
+    int visibleRows() const;
+
+    bool open_ = false;
+    std::string title_;
+    std::vector<PickEntry> entries_;
+    int sel_ = 0;
+    int scroll_ = 0;
+};
+
+// runs/ scans, newest first. Replay files: */wins.gdtrace, */eval.gdtrace,
+// */traces/*.gdtrace. Live files: */live.bin.
+std::vector<PickEntry> scanReplayFiles();
+std::vector<PickEntry> scanLiveFiles();
+std::string newestLiveFile();  // "" when none exist
 
 class ReplayMode : public Mode {
 public:
@@ -29,12 +65,14 @@ private:
         int deathAge = -1;  // ticks since death; -1 = alive
         Color tint{};
     };
+    void loadFile();
     void restart();
 
     std::string path_;
     std::string error_;
     gdcore::PhysicsConfig cfg_ = gdcore::stereoMadnessCube();
     std::vector<Ghost> ghosts_;
+    Picker picker_;
     double accum_ = 0.0;
     long long tick_ = 0;
     int speedIdx_ = 1;  // index into kSpeeds
@@ -68,6 +106,7 @@ private:
 
     std::string path_;
     Snapshot snap_;
+    Picker picker_;
     bool follow_ = true;  // F: follow leader vs free drag/zoom camera
     float camY_ = 0.0f;
     Camera2D cam_{};

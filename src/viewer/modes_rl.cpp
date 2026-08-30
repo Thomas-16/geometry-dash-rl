@@ -1,9 +1,11 @@
 #include "viewer/modes_rl.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 
 namespace gdv {
 
@@ -57,7 +59,189 @@ float rdF32(const unsigned char* p) {
     return v;
 }
 
+// "3m ago" / "2h ago" from a file's last write time.
+std::string ageLabel(const std::filesystem::path& p) {
+    std::error_code ec;
+    auto t = std::filesystem::last_write_time(p, ec);
+    if (ec) return "";
+    auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::filesystem::file_time_type::clock::now() - t)
+                    .count();
+    if (secs < 0) secs = 0;
+    char buf[32];
+    if (secs < 90) std::snprintf(buf, sizeof buf, "%llds ago", (long long)secs);
+    else if (secs < 5400)
+        std::snprintf(buf, sizeof buf, "%lldm ago", (long long)(secs / 60));
+    else if (secs < 60 * 60 * 48)
+        std::snprintf(buf, sizeof buf, "%lldh ago", (long long)(secs / 3600));
+    else
+        std::snprintf(buf, sizeof buf, "%lldd ago", (long long)(secs / 86400));
+    return buf;
+}
+
+// Episode count from a .gdtrace header (16 bytes), -1 on failure.
+int traceEpisodeCount(const std::filesystem::path& p) {
+    FILE* f = std::fopen(p.string().c_str(), "rb");
+    if (!f) return -1;
+    unsigned char head[16];
+    bool ok = std::fread(head, 1, 16, f) == 16 && rdU32(head) == 0x52544447u;
+    std::fclose(f);
+    return ok ? (int)rdU32(head + 12) : -1;
+}
+
+std::string runsRelLabel(const std::filesystem::path& p) {
+    // "runs/opt1/wins.gdtrace" -> "opt1/wins.gdtrace"
+    auto rel = std::filesystem::relative(p, "runs");
+    return rel.empty() ? p.string() : rel.generic_string();
+}
+
 } // namespace
+
+std::vector<PickEntry> scanReplayFiles() {
+    namespace fs = std::filesystem;
+    std::vector<fs::path> found;
+    std::error_code ec;
+    for (auto& run : fs::directory_iterator("runs", ec)) {
+        if (!run.is_directory()) continue;
+        for (const char* name : {"wins.gdtrace", "eval.gdtrace"}) {
+            fs::path p = run.path() / name;
+            if (fs::exists(p, ec)) found.push_back(p);
+        }
+        std::error_code ec2;
+        for (auto& t : fs::directory_iterator(run.path() / "traces", ec2))
+            if (t.path().extension() == ".gdtrace") found.push_back(t.path());
+    }
+    std::sort(found.begin(), found.end(), [](const auto& a, const auto& b) {
+        std::error_code e;
+        return fs::last_write_time(a, e) > fs::last_write_time(b, e);
+    });
+    std::vector<PickEntry> out;
+    for (const auto& p : found) {
+        int eps = traceEpisodeCount(p);
+        std::string label = runsRelLabel(p);
+        if (eps >= 0) label += TextFormat("   (%d ep)", eps);
+        std::string age = ageLabel(p);
+        if (!age.empty()) label += "   " + age;
+        out.push_back({std::move(label), p.string()});
+    }
+    return out;
+}
+
+std::vector<PickEntry> scanLiveFiles() {
+    namespace fs = std::filesystem;
+    std::vector<fs::path> found;
+    std::error_code ec;
+    for (auto& run : fs::directory_iterator("runs", ec)) {
+        fs::path p = run.path() / "live.bin";
+        if (run.is_directory() && fs::exists(p, ec)) found.push_back(p);
+    }
+    std::sort(found.begin(), found.end(), [](const auto& a, const auto& b) {
+        std::error_code e;
+        return fs::last_write_time(a, e) > fs::last_write_time(b, e);
+    });
+    std::vector<PickEntry> out;
+    for (const auto& p : found) {
+        std::string label = runsRelLabel(p);
+        std::string age = ageLabel(p);
+        if (!age.empty()) label += "   updated " + age;
+        out.push_back({std::move(label), p.string()});
+    }
+    return out;
+}
+
+std::string newestLiveFile() {
+    auto files = scanLiveFiles();
+    return files.empty() ? "" : files.front().path;
+}
+
+// --------------------------------------------------------------------- Picker
+
+void Picker::open(std::string title, std::vector<PickEntry> entries) {
+    title_ = std::move(title);
+    entries_ = std::move(entries);
+    sel_ = 0;
+    scroll_ = 0;
+    open_ = true;
+}
+
+Rectangle Picker::panel() const {
+    float w = std::min(780.0f, GetScreenWidth() - 80.0f);
+    float h = std::min(540.0f, GetScreenHeight() - 120.0f);
+    return {(GetScreenWidth() - w) / 2.0f, (GetScreenHeight() - h) / 2.0f, w, h};
+}
+
+int Picker::visibleRows() const {
+    return std::max(1, (int)((panel().height - 84.0f) / 24.0f));
+}
+
+std::string Picker::update() {
+    if (!open_) return "";
+    if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_O)) {
+        open_ = false;
+        return "";
+    }
+    int n = (int)entries_.size();
+    if (n > 0) {
+        if (IsKeyPressed(KEY_DOWN)) sel_ = (sel_ + 1) % n;
+        if (IsKeyPressed(KEY_UP)) sel_ = (sel_ + n - 1) % n;
+        sel_ -= (int)GetMouseWheelMove();
+        sel_ = std::clamp(sel_, 0, n - 1);
+        int rows = visibleRows();
+        if (sel_ < scroll_) scroll_ = sel_;
+        if (sel_ >= scroll_ + rows) scroll_ = sel_ - rows + 1;
+
+        Rectangle p = panel();
+        Vector2 m = GetMousePosition();
+        int hover = -1;
+        if (m.x >= p.x + 8 && m.x <= p.x + p.width - 8) {
+            int row = (int)((m.y - (p.y + 48.0f)) / 24.0f);
+            if (row >= 0 && row < rows && scroll_ + row < n)
+                hover = scroll_ + row;
+        }
+        if (hover >= 0) sel_ = hover;
+        if (IsKeyPressed(KEY_ENTER) ||
+            (hover >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))) {
+            open_ = false;
+            return entries_[sel_].path;
+        }
+    } else if (IsKeyPressed(KEY_ENTER)) {
+        open_ = false;
+    }
+    return "";
+}
+
+void Picker::draw() const {
+    if (!open_) return;
+    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(),
+                  Color{0, 0, 0, 140});
+    Rectangle p = panel();
+    DrawRectangleRec(p, Color{24, 26, 38, 245});
+    DrawRectangleLinesEx(p, 2.0f, Color{110, 120, 170, 255});
+    DrawText(title_.c_str(), (int)p.x + 16, (int)p.y + 14, 20, RAYWHITE);
+    int rows = visibleRows();
+    int n = (int)entries_.size();
+    if (n == 0) {
+        DrawText("nothing found under runs/", (int)p.x + 16, (int)p.y + 56, 18,
+                 Color{220, 160, 160, 255});
+    }
+    for (int r = 0; r < rows && scroll_ + r < n; ++r) {
+        int i = scroll_ + r;
+        float y = p.y + 48.0f + r * 24.0f;
+        if (i == sel_)
+            DrawRectangle((int)p.x + 8, (int)y - 2, (int)p.width - 16, 22,
+                          Color{60, 70, 120, 255});
+        DrawText(entries_[i].label.c_str(), (int)p.x + 16, (int)y, 18,
+                 i == sel_ ? RAYWHITE : Color{185, 190, 210, 255});
+    }
+    if (n > rows)
+        DrawText(TextFormat("%d-%d of %d", scroll_ + 1,
+                            std::min(scroll_ + rows, n), n),
+                 (int)p.x + 16, (int)(p.y + p.height - 26), 16,
+                 Color{140, 145, 170, 255});
+    DrawText("up/down or wheel: select   Enter/click: open   Esc: cancel",
+             (int)(p.x + p.width - 470), (int)(p.y + p.height - 26), 16,
+             Color{140, 145, 170, 255});
+}
 
 // ------------------------------------------------------------------ ReplayMode
 
@@ -74,6 +258,17 @@ void ReplayMode::restart() {
 void ReplayMode::enter(App&) {
     SetTargetFPS(60);
     if (!ghosts_.empty()) return;  // already loaded; keep replay position
+    if (path_.empty()) {
+        // Reached without --replay: go straight to the file picker.
+        if (!picker_.isOpen())
+            picker_.open("Open replay trace", scanReplayFiles());
+        return;
+    }
+    loadFile();
+}
+
+void ReplayMode::loadFile() {
+    ghosts_.clear();
     error_.clear();
     // .gdtrace: see python/gdrl/traces.py for the format definition.
     FILE* f = std::fopen(path_.c_str(), "rb");
@@ -112,6 +307,17 @@ void ReplayMode::enter(App&) {
 void ReplayMode::update(App& app) {
     static constexpr float kSpeeds[] = {0.25f, 1.0f, 2.0f, 4.0f, 8.0f, 32.0f};
     constexpr int kNumSpeeds = 6;
+    if (picker_.isOpen()) {
+        std::string sel = picker_.update();
+        if (!sel.empty()) {
+            path_ = sel;
+            loadFile();
+            restart();
+        }
+        return;  // modal: swallow the mode's own keys
+    }
+    if (IsKeyPressed(KEY_O))
+        picker_.open("Open replay trace", scanReplayFiles());
     if (IsKeyPressed(KEY_SPACE)) paused_ = !paused_;
     if (IsKeyPressed(KEY_R)) restart();
     if (IsKeyPressed(KEY_F)) follow_ = !follow_;
@@ -178,24 +384,40 @@ void ReplayMode::draw(const App& app) {
 
     if (!error_.empty()) {
         DrawText(error_.c_str(), 12, 10, 20, RED);
+        DrawText("O: open another trace", 12, 34, 16,
+                 Color{170, 175, 200, 255});
+        picker_.draw();
+        return;
+    }
+    if (ghosts_.empty()) {
+        DrawText("Replay — no trace loaded", 12, 10, 20, RAYWHITE);
+        DrawText("O: open a trace from runs/", 12, 34, 16,
+                 Color{170, 175, 200, 255});
+        picker_.draw();
         return;
     }
     static constexpr float kSpeeds[] = {0.25f, 1.0f, 2.0f, 4.0f, 8.0f, 32.0f};
     float pct = app.maxX > 0 ? 100.0f * lx / app.maxX : 0.0f;
-    DrawText(TextFormat("Replay  %zu episodes   alive %d   finished %d   "
+    DrawText(TextFormat("Replay [%s]  %zu episodes   alive %d   finished %d   "
                         "wins %d   lead x %.0f (%.0f%%)   tick %lld   %gx%s",
-                        ghosts_.size(), alive, finished, wonCount, lx, pct,
-                        tick_, kSpeeds[speedIdx_], paused_ ? "  [paused]" : ""),
+                        path_.c_str(), ghosts_.size(), alive, finished,
+                        wonCount, lx, pct, tick_, kSpeeds[speedIdx_],
+                        paused_ ? "  [paused]" : ""),
              12, 10, 20, RAYWHITE);
     DrawText(TextFormat("space: pause   left/right: speed   R: restart   "
-                        "F: %s camera (drag/wheel when free)",
+                        "O: open trace   F: %s camera (drag/wheel when free)",
                         follow_ ? "follow" : "FREE"),
              12, 34, 16, Color{170, 175, 200, 255});
+    picker_.draw();
 }
 
 // ------------------------------------------------------------ TrainingViewMode
 
-void TrainingViewMode::enter(App&) { SetTargetFPS(60); }
+void TrainingViewMode::enter(App&) {
+    SetTargetFPS(60);
+    // No --watch flag: follow the most recently updated run automatically.
+    if (path_.empty()) path_ = newestLiveFile();
+}
 
 bool TrainingViewMode::poll() {
     // live.bin layout: see python/gdrl/live.py. Seqlock: odd seq = write in
@@ -240,18 +462,33 @@ bool TrainingViewMode::poll() {
 }
 
 void TrainingViewMode::update(App&) {
+    if (picker_.isOpen()) {
+        std::string sel = picker_.update();
+        if (!sel.empty()) {
+            path_ = sel;
+            snap_ = Snapshot{};
+        }
+        return;
+    }
+    if (IsKeyPressed(KEY_O))
+        picker_.open("Watch training run", scanLiveFiles());
     if (IsKeyPressed(KEY_F)) follow_ = !follow_;
     if (!follow_) freeCamUpdate(cam_);
-    poll();
+    if (!path_.empty()) poll();
 }
 
 void TrainingViewMode::draw(const App& app) {
     if (!snap_.valid) {
         drawBackground(app, 0.0f);
-        DrawText(TextFormat("Training view: waiting for %s", path_.c_str()),
+        DrawText(path_.empty()
+                     ? "Training view: no live.bin found under runs/"
+                     : TextFormat("Training view: waiting for %s",
+                                  path_.c_str()),
                  12, 10, 20, RAYWHITE);
-        DrawText("start the trainer with --watch to publish live states",
+        DrawText("start the trainer with --watch to publish live states   "
+                 "O: pick a run",
                  12, 34, 16, Color{170, 175, 200, 255});
+        picker_.draw();
         return;
     }
     size_t n = snap_.ship.size();
@@ -296,16 +533,17 @@ void TrainingViewMode::draw(const App& app) {
     float pct = app.maxX > 0 ? 100.0f * snap_.bestX / app.maxX : 0.0f;
     double gameHours =
         (double)snap_.globalTicks / 240.0 / 3600.0;
-    DrawText(TextFormat("Training  %zu envs   alive %d   lead x %.0f   "
+    DrawText(TextFormat("Training [%s]  %zu envs   alive %d   lead x %.0f   "
                         "best %.0f (%.1f%%)   ep %u   %.2fM ticks/s   "
                         "%.1fh game time",
-                        n, alive, leadX, snap_.bestX, pct, snap_.episodes,
-                        snap_.sps / 1e6, gameHours),
+                        path_.c_str(), n, alive, leadX, snap_.bestX, pct,
+                        snap_.episodes, snap_.sps / 1e6, gameHours),
              12, 10, 20, RAYWHITE);
-    DrawText(TextFormat("live view of the PPO trainer (read-only)   "
-                        "F: %s camera (drag/wheel when free)",
+    DrawText(TextFormat("live view of the PPO trainer (read-only)   O: pick "
+                        "run   F: %s camera (drag/wheel when free)",
                         follow_ ? "follow" : "FREE"),
              12, 34, 16, Color{170, 175, 200, 255});
+    picker_.draw();
 }
 
 }  // namespace gdv

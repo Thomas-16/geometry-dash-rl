@@ -15,9 +15,15 @@
 //   (trainer must run with --watch to publish runs/<name>/live.bin).
 //   --replay starts in the replay view: every episode in the .gdtrace
 //   re-simulated in lockstep as a ghost.
-// Keys: TAB / 1 / 2 / 3 [/ 4] = mode (Browse / Play / Training [/ Replay])
+// All flags are optional conveniences: the Training and Replay views pick
+// their files in-GUI (O opens a runs/ browser; Training auto-follows the
+// newest live.bin), H shows every keybind, F12 takes a screenshot, and
+// [ / ] nudge the music offset live.
+// Keys: TAB / 1 / 2 / 3 / 4 = mode (Browse / Play / Training / Replay)
 //       T = textured/shapes toggle, D = debug markers (triggers, unknowns)
-//       F11 = borderless fullscreen
+//       O = open file picker (Training/Replay), H = keybind help
+//       [ / ] = music offset -/+ 10 ms, F12 = screenshot
+//       F11 = borderless fullscreen (ESC does not quit; close the window)
 
 #include "core/geometry.hpp"
 #include "core/level.hpp"
@@ -29,7 +35,9 @@
 #include "raylib.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <string>
 
@@ -39,7 +47,7 @@ static const char* kDefaultLevel =
 int main(int argc, char** argv) {
     std::string levelPath = kDefaultLevel;
     std::string shotPath, resDirOverride;
-    std::string livePath = "runs/run/live.bin", replayPath;
+    std::string livePath, replayPath;  // empty = pick in-GUI / auto-detect
     float camX = 0.0f, zoom = 1.5f, musicOffset = 0.0f;
     int startMode = 0;  // 0 = Browse (default, keeps --shot automation), 1 = Play
     for (int i = 1; i < argc; ++i) {
@@ -164,11 +172,15 @@ int main(int argc, char** argv) {
     gdv::TrainingViewMode training(livePath);
     gdv::ReplayMode replay(replayPath);
     gdv::Mode* modes[] = {&browse, &play, &training, &replay};
-    // Replay is only reachable when a trace was given (no default file).
-    const int kModeCount = replayPath.empty() ? 3 : 4;
+    constexpr int kModeCount = 4;
     int cur = startMode;
     modes[cur]->enter(app);
 
+    // ESC is the picker's cancel key, not an app-quit shortcut.
+    SetExitKey(KEY_NULL);
+
+    bool helpOpen = false;
+    float offsetNote = 0.0f;  // seconds left showing the music-offset toast
     int frame = 0;
     while (!WindowShouldClose()) {
         int want = cur;
@@ -176,20 +188,61 @@ int main(int argc, char** argv) {
         if (IsKeyPressed(KEY_ONE)) want = 0;
         if (IsKeyPressed(KEY_TWO)) want = 1;
         if (IsKeyPressed(KEY_THREE)) want = 2;
-        if (IsKeyPressed(KEY_FOUR) && kModeCount > 3) want = 3;
+        if (IsKeyPressed(KEY_FOUR)) want = 3;
         if (want != cur) { modes[cur]->exit(app); cur = want; modes[cur]->enter(app); }
         if (IsKeyPressed(KEY_T) && app.textured) app.useTextures = !app.useTextures;
         if (IsKeyPressed(KEY_D)) app.debugMarkers = !app.debugMarkers;
         if (IsKeyPressed(KEY_F11)) ToggleBorderlessWindowed();
+        if (IsKeyPressed(KEY_H)) helpOpen = !helpOpen;
+        if (IsKeyPressed(KEY_LEFT_BRACKET)) { app.musicOffset -= 0.010f; offsetNote = 1.5f; }
+        if (IsKeyPressed(KEY_RIGHT_BRACKET)) { app.musicOffset += 0.010f; offsetNote = 1.5f; }
+        if (IsKeyPressed(KEY_F12)) {
+            // Relative path: raylib's TakeScreenshot prepends the CWD itself.
+            TakeScreenshot(TextFormat("shot_%lld.png", (long long)time(nullptr)));
+        }
 
         if (app.musicLoaded) UpdateMusicStream(app.music);
         modes[cur]->update(app);
 
         BeginDrawing();
         modes[cur]->draw(app);
-        DrawText(TextFormat("[%s]   TAB/1-4: mode   T: textures   D: debug   F11: fullscreen",
+        DrawText(TextFormat("[%s]   TAB/1-4: mode   H: help   T: textures   D: debug   F11: fullscreen",
                             modes[cur]->name()),
                  12, GetScreenHeight() - 24, 16, Color{170, 175, 200, 255});
+        if (offsetNote > 0.0f) {
+            offsetNote -= GetFrameTime();
+            const char* txt = TextFormat("music offset %+d ms",
+                                         (int)std::lround(app.musicOffset * 1000.0f));
+            DrawText(txt, GetScreenWidth() - MeasureText(txt, 18) - 16, 12, 18, RAYWHITE);
+        }
+        if (helpOpen) {
+            static const char* kHelp[] = {
+                "TAB / 1-4      mode: Browse / Play / Training / Replay",
+                "T              textures <-> colored shapes",
+                "D              debug markers (triggers, unknown ids)",
+                "F11            borderless fullscreen",
+                "F12            screenshot (shot_*.png in the working dir)",
+                "[ / ]          music offset -/+ 10 ms",
+                "H              toggle this help",
+                "",
+                "Browse:   drag = pan   wheel = zoom   SPACE = autoscroll   R = reset camera",
+                "Play:     SPACE / UP / click = jump (hold to buffer)   R = restart",
+                "Training: O = pick run to watch   F = follow / free camera",
+                "Replay:   O = open trace   SPACE = pause   LEFT/RIGHT = speed",
+                "          R = restart   F = follow / free camera",
+                "",
+                "Picker:   arrows / wheel = select   ENTER / click = open   ESC = cancel",
+            };
+            constexpr int kHelpLines = sizeof(kHelp) / sizeof(kHelp[0]);
+            int w = 640, h = 30 + kHelpLines * 24 + 16;
+            int x = (GetScreenWidth() - w) / 2, y = (GetScreenHeight() - h) / 2;
+            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{0, 0, 0, 140});
+            DrawRectangle(x, y, w, h, Color{24, 26, 38, 245});
+            DrawRectangleLines(x, y, w, h, Color{110, 120, 170, 255});
+            DrawText("Keybinds", x + 16, y + 12, 20, RAYWHITE);
+            for (int i = 0; i < kHelpLines; ++i)
+                DrawText(kHelp[i], x + 16, y + 42 + i * 24, 18, Color{185, 190, 210, 255});
+        }
         EndDrawing();
 
         if (!shotPath.empty() && ++frame >= 5) {
