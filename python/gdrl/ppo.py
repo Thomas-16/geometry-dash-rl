@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from .model import ActorCritic
+from .model import ActorCritic, autocast_ctx
 
 
 @dataclass
@@ -37,41 +37,50 @@ class PPOConfig:
     # Stop the epoch loop when the update drifts this far from the rollout
     # policy — bounds the damage any single update can do.
     target_kl: float = 0.02
+    # Trunk precision: "bf16" autocast (2.3x faster update on Ada, heads and
+    # losses stay fp32 — see model.py) or "none" for the pure fp32 path.
+    amp: str = "bf16"
 
 
 class RolloutBuffer:
+    """Observations live on the device (the only large field, written
+    straight from the env's pinned host buffer); every per-step scalar field
+    is host-side numpy, filled from one stacked device->host copy per step,
+    so GAE is a cheap numpy scan and the update uploads its inputs once."""
+
     def __init__(self, steps: int, n_envs: int, obs_dim: int,
                  device: torch.device):
         self.steps, self.n_envs = steps, n_envs
         self.device = device
         s = (steps, n_envs)
         self.obs = torch.zeros(*s, obs_dim, device=device)
-        self.actions = torch.zeros(*s, device=device)
-        self.logprobs = torch.zeros(*s, device=device)
-        self.rewards = torch.zeros(*s, device=device)
-        self.values = torch.zeros(*s, device=device)
+        self.actions = np.zeros(s, np.float32)
+        self.logprobs = np.zeros(s, np.float32)
+        self.rewards = np.zeros(s, np.float32)
+        self.values = np.zeros(s, np.float32)
         # per-step discount gamma^ticks (variable-duration SMDP steps)
-        self.discounts = torch.zeros(*s, device=device)
+        self.discounts = np.zeros(s, np.float32)
         # done = terminated (bootstrap 0); trunc_value = V(final_obs) where
         # truncated, folded into the reward before GAE.
-        self.terminated = torch.zeros(*s, device=device)
+        self.terminated = np.zeros(s, np.float32)
         self.t = 0
 
-    def add(self, obs, actions, logprobs, rewards, values, discounts,
-            terminated):
+    def add(self, alv: np.ndarray, rewards: np.ndarray, discounts: np.ndarray,
+            terminated: np.ndarray):
+        """alv: [3, n_envs] = action, logprob, value (model.act output).
+        The obs row for this step was already copied into self.obs[t]."""
         i = self.t
-        self.obs[i] = obs
-        self.actions[i] = actions
-        self.logprobs[i] = logprobs
+        self.actions[i] = alv[0]
+        self.logprobs[i] = alv[1]
+        self.values[i] = alv[2]
         self.rewards[i] = rewards
-        self.values[i] = values
         self.discounts[i] = discounts
         self.terminated[i] = terminated
         self.t += 1
 
-    def compute_advantages(self, last_value: torch.Tensor, lam: float):
-        adv = torch.zeros_like(self.rewards)
-        gae = torch.zeros(self.n_envs, device=self.device)
+    def compute_advantages(self, last_value: np.ndarray, lam: float):
+        adv = np.zeros_like(self.rewards)
+        gae = np.zeros(self.n_envs, np.float32)
         for t in reversed(range(self.steps)):
             nonterminal = 1.0 - self.terminated[t]
             next_value = last_value if t == self.steps - 1 else self.values[t + 1]
@@ -98,7 +107,9 @@ class PPO:
         self.cfg = cfg
         self.device = device
         self.optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr,
-                                          eps=1e-5)
+                                          eps=1e-5,
+                                          fused=device.type == "cuda")
+        self._mb_obs: torch.Tensor | None = None  # reused gather target
 
     def update(self, buf: RolloutBuffer, last_obs: torch.Tensor,
                progress: float, lr_override: float | None = None,
@@ -106,6 +117,7 @@ class PPO:
         """progress in [0,1] drives lr/entropy annealing; the overrides
         replace the annealed values for this call (polish phase)."""
         cfg = self.cfg
+        dev = self.device
         lr = cfg.lr + (cfg.lr_final - cfg.lr) * progress
         ent_coef = cfg.ent_coef + (cfg.ent_coef_final - cfg.ent_coef) * progress
         if lr_override is not None:
@@ -115,32 +127,39 @@ class PPO:
         for g in self.optimizer.param_groups:
             g["lr"] = lr
 
-        with torch.no_grad():
-            _, last_value = self.model(last_obs)
+        with torch.no_grad(), autocast_ctx(dev, cfg.amp):
+            last_value = self.model(last_obs)[1].float().cpu().numpy()
         adv, returns = buf.compute_advantages(last_value, cfg.gae_lambda)
 
         b_obs = buf.obs.reshape(-1, buf.obs.shape[-1])
-        b_actions = buf.actions.reshape(-1)
-        b_logprobs = buf.logprobs.reshape(-1)
-        b_values = buf.values.reshape(-1)
-        b_adv = adv.reshape(-1)
-        b_returns = returns.reshape(-1)
-
         n = b_obs.shape[0]
+        # One upload of every host-side field, then everything stays on the
+        # device: [5, n] = actions, old logprobs, old values, adv, returns.
+        host = np.stack([buf.actions.reshape(-1), buf.logprobs.reshape(-1),
+                         buf.values.reshape(-1), adv.reshape(-1),
+                         returns.reshape(-1)])
+        b_actions, b_logprobs, b_values, b_adv, b_returns = torch.as_tensor(
+            host, device=dev).unbind(0)
+
         mb_size = n // cfg.minibatches
-        idx = torch.arange(n, device=self.device)
-        stats = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0,
-                 "approx_kl": 0.0, "clip_frac": 0.0}
+        if self._mb_obs is None or self._mb_obs.shape[0] != mb_size:
+            self._mb_obs = torch.empty(mb_size, b_obs.shape[1], device=dev)
+        mb_obs = self._mb_obs
+        # Stats accumulate on the device; the KL early-stop check is the
+        # only per-minibatch host sync.
+        stat_sum = torch.zeros(5, device=dev)
         count = 0
         stop = False
         for _ in range(cfg.epochs):
             if stop:
                 break
-            perm = idx[torch.randperm(n, device=self.device)]
+            perm = torch.randperm(n, device=dev)
             for mb in range(cfg.minibatches):
                 m = perm[mb * mb_size:(mb + 1) * mb_size]
-                logprob, entropy, value = self.model.evaluate(
-                    b_obs[m], b_actions[m])
+                torch.index_select(b_obs, 0, m, out=mb_obs)
+                with autocast_ctx(dev, cfg.amp):
+                    logprob, entropy, value = self.model.evaluate(
+                        mb_obs, b_actions[m])
                 ratio = (logprob - b_logprobs[m]).exp()
                 madv = b_adv[m]
                 # std floor 1e-2: when the policy plateaus at one obstacle,
@@ -151,11 +170,11 @@ class PPO:
                 pg1 = -madv * ratio
                 pg2 = -madv * ratio.clamp(1 - cfg.clip, 1 + cfg.clip)
                 policy_loss = torch.max(pg1, pg2).mean()
-                v_clipped = b_values[m] + (value - b_values[m]).clamp(
-                    -cfg.vf_clip, cfg.vf_clip)
+                mv = b_values[m]
+                v_clipped = mv + (value - mv).clamp(-cfg.vf_clip, cfg.vf_clip)
+                mr = b_returns[m]
                 value_loss = 0.5 * torch.max(
-                    (value - b_returns[m]) ** 2,
-                    (v_clipped - b_returns[m]) ** 2).mean()
+                    (value - mr) ** 2, (v_clipped - mr) ** 2).mean()
                 ent = entropy.mean()
                 loss = policy_loss + cfg.vf_coef * value_loss - ent_coef * ent
                 self.optimizer.zero_grad(set_to_none=True)
@@ -164,19 +183,16 @@ class PPO:
                                                cfg.max_grad_norm)
                 self.optimizer.step()
                 with torch.no_grad():
-                    kl = ((ratio - 1) - ratio.log()).mean().item()
-                    stats["policy_loss"] += policy_loss.item()
-                    stats["value_loss"] += value_loss.item()
-                    stats["entropy"] += ent.item()
-                    stats["approx_kl"] += kl
-                    stats["clip_frac"] += ((ratio - 1).abs()
-                                           > cfg.clip).float().mean().item()
+                    kl = ((ratio - 1) - ratio.log()).mean()
+                    stat_sum += torch.stack([
+                        policy_loss.detach(), value_loss.detach(),
+                        ent.detach(), kl,
+                        ((ratio - 1).abs() > cfg.clip).float().mean()])
                 count += 1
-                if cfg.target_kl > 0 and kl > cfg.target_kl:
+                if cfg.target_kl > 0 and kl.item() > cfg.target_kl:
                     stop = True
                     break
-        for k in stats:
-            stats[k] /= count
-        stats["lr"] = lr
-        stats["ent_coef"] = ent_coef
-        return stats
+        s = (stat_sum / count).tolist()
+        return {"policy_loss": s[0], "value_loss": s[1], "entropy": s[2],
+                "approx_kl": s[3], "clip_frac": s[4],
+                "lr": lr, "ent_coef": ent_coef}

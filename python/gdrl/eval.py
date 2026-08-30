@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 from .env import GdVecEnv
-from .model import make_model
+from .model import AMP_MODES, autocast_ctx, configure_backend, make_model
 from . import traces
 
 
@@ -44,11 +44,16 @@ def main():
     p.add_argument("--ticks-per-action", type=int, default=4)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available()
                    else "cpu")
+    p.add_argument("--amp", choices=AMP_MODES, default=None,
+                   help="trunk precision; default = what the checkpoint's "
+                        "run trained with")
     args = p.parse_args()
 
+    configure_backend()
     device = torch.device(args.device)
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     run_dir = Path(args.checkpoint).resolve().parent
+    amp = args.amp or ckpt.get("config", {}).get("amp", "none")
 
     n = args.episodes + 1  # env 0 acts deterministically
     env = GdVecEnv(args.level, n, args.ticks_per_action, args.end_x)
@@ -58,16 +63,14 @@ def main():
     model.load_state_dict(ckpt["model"])
     model.eval()
 
-    obs = torch.as_tensor(env.reset().copy(), device=device)
+    obs = torch.as_tensor(env.reset(), device=device)
     episodes: list[traces.Episode | None] = [None] * n
     while any(e is None for e in episodes):
-        with torch.no_grad():
+        with torch.no_grad(), autocast_ctx(device, amp):
             logit, _ = model(obs)
-            stoch = torch.bernoulli(torch.sigmoid(logit))
-            det = (logit > 0).float()
-        act = stoch
-        act[0] = det[0]
-        actions_np = act.cpu().numpy().astype(np.uint8)
+        act = (torch.rand_like(logit) < torch.sigmoid(logit))
+        act[0] = logit[0] > 0
+        actions_np = act.to(torch.uint8).cpu().numpy()
         next_obs, _, term, trunc, info = env.step(actions_np)
         done = (term | trunc).astype(bool)
         for i in np.nonzero(done)[0]:
@@ -75,7 +78,7 @@ def main():
                 episodes[i] = traces.Episode(env.last_episode_holds(int(i)),
                                              float(info["final_x"][i]),
                                              bool(info["won"][i]))
-        obs = torch.as_tensor(next_obs, device=device).clone()
+        obs = torch.as_tensor(next_obs, device=device)
 
     eps: list[traces.Episode] = episodes  # type: ignore
     det_ep, stoch_eps = eps[0], eps[1:]

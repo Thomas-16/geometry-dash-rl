@@ -284,4 +284,52 @@ GDENV_API void gdenv_reset_env(GdEnv* env, int32_t i, float* obs_i) {
                         obs_i);
 }
 
+GDENV_API int32_t gdenv_replay(GdEnv* env, int32_t k, const uint8_t* holds,
+                               const int32_t* lengths, int32_t max_steps,
+                               float* obs, uint8_t* acts, float* rews,
+                               float* ticks, int32_t* n_steps) {
+    if (k < 0 || k > static_cast<int32_t>(env->envs.size()) || !holds ||
+        !lengths || !n_steps || max_steps < 0 ||
+        (max_steps > 0 && (!acts || !rews || !ticks))) {
+        g_lastError = "gdenv_replay: bad arguments";
+        return -1;
+    }
+    std::vector<int64_t> offsets(static_cast<size_t>(k) + 1, 0);
+    for (int32_t i = 0; i < k; ++i)
+        offsets[static_cast<size_t>(i) + 1] =
+            offsets[static_cast<size_t>(i)] + lengths[i];
+    env->pool->run(k, [&](int i) {
+        gdenv::EnvInstance& e = env->envs[i];
+        const uint8_t* h = holds + offsets[static_cast<size_t>(i)];
+        const int32_t len = lengths[i];
+        const size_t row0 = static_cast<size_t>(i) * max_steps;
+        e.reset();
+        int32_t t = 0;
+        int64_t cursor = 0;
+        while (cursor < len) {
+            const bool hold = h[cursor] != 0;
+            const bool rec = t < max_steps;
+            const size_t row = row0 + t;
+            if (rec) {
+                if (obs)
+                    gdenv::buildObs(e.s, env->geom, env->endX, env->cfg.dx,
+                                    obs + row * gdenv::kObsDim);
+                acts[row] = hold ? 1 : 0;
+            }
+            gdenv::StepResult r =
+                e.step(hold, env->cfg, env->geom, env->ecfg, env->endX);
+            if (rec) {
+                rews[row] = r.reward;
+                ticks[row] = static_cast<float>(r.ticks);
+            }
+            ++t;
+            cursor += r.ticks;
+            if (r.terminated || r.truncated) break;
+        }
+        n_steps[i] = t;
+        e.reset();
+    });
+    return 0;
+}
+
 } // extern "C"

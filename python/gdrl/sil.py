@@ -16,7 +16,8 @@ regenerated on demand, never cached — the sim is the experience buffer.
 Replay correctness: at each decision boundary the macro layer's action is
 exactly the recorded hold bit at that tick (a hop macro starts with hold=1,
 walk/air/ship windows hold a constant bit), so feeding holds[cursor] back
-as the action reproduces the original trajectory bit-for-bit.
+as the action reproduces the original trajectory bit-for-bit. The replay
+itself is one DLL call (`gdenv_replay`, thread-pooled over episodes).
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import numpy as np
 import torch
 
 from .env import GdVecEnv
+from .model import autocast_ctx
 
 
 class SILBuffer:
@@ -35,30 +37,34 @@ class SILBuffer:
         self.cap_deaths = cap_deaths
         self.wins: list[tuple[np.ndarray, float]] = []    # (holds, final_x)
         self.deaths: list[tuple[np.ndarray, float]] = []
+        self._keys: set[bytes] = set()
 
     def __len__(self) -> int:
         return len(self.wins) + len(self.deaths)
 
+    @staticmethod
+    def _key(holds: np.ndarray) -> bytes:
+        return np.asarray(holds, np.uint8).tobytes()
+
     def add(self, holds: np.ndarray, final_x: float, won: bool) -> None:
         if len(holds) == 0:
             return
+        # Dedupe identical input sequences (deterministic sim -> identical
+        # trajectories add nothing): O(1) set lookup on the raw bytes.
+        key = self._key(holds)
+        if key in self._keys:
+            return
         pool = self.wins if won else self.deaths
         cap = self.cap_wins if won else self.cap_deaths
-        # Dedupe identical input sequences (deterministic sim -> identical
-        # trajectories add nothing).
-        key = (len(holds), holds.tobytes())
-        for h, _ in pool:
-            if (len(h), h.tobytes()) == key:
-                return
         pool.append((np.asarray(holds, np.uint8), float(final_x)))
+        self._keys.add(key)
         if len(pool) > cap:
             # Wins are interchangeable certificates: FIFO. Deaths: keep the
             # deepest (they carry the most not-yet-mastered level suffix).
-            if won:
-                pool.pop(0)
-            else:
+            if not won:
                 pool.sort(key=lambda t: t[1])
-                pool.pop(0)
+            dropped, _ = pool.pop(0)
+            self._keys.discard(self._key(dropped))
 
     def sample(self, k: int, rng: np.random.Generator) -> list[np.ndarray]:
         """Up to k episodes, wins weighted 3x."""
@@ -77,61 +83,38 @@ class SILBuffer:
     def load_state_dict(self, d: dict) -> None:
         self.wins = list(d.get("wins", []))
         self.deaths = list(d.get("deaths", []))
+        self._keys = {self._key(h) for h, _ in self.wins + self.deaths}
 
 
 def replay(env: GdVecEnv, episodes: list[np.ndarray]):
     """Regenerate decision streams for episodes (assigned to envs 0..k-1).
 
     Returns per-episode (obs [T, obs_dim], actions [T], rewards [T],
-    ticks [T]) as float32/uint8 numpy arrays. Uses the whole handle's step
-    (idle envs step too — the sim is cheap); each traced env is reset first.
-    """
-    k = len(episodes)
-    assert k <= env.n_envs
-    cursors = np.zeros(k, np.int64)
-    active = np.ones(k, bool)
-    out = [([], [], [], []) for _ in range(k)]
-    for i in range(k):
-        env.reset_env(i)
-    obs_now = env._obs.copy()
-    acts = np.zeros(env.n_envs, np.uint8)
-    while active.any():
-        for i in np.nonzero(active)[0]:
-            acts[i] = episodes[i][cursors[i]]
-        obs, rew, term, trunc, info = env.step(acts)
-        for i in np.nonzero(active)[0]:
-            o, a, r, t = out[i]
-            o.append(obs_now[i].copy())
-            a.append(acts[i])
-            r.append(rew[i])
-            nt = int(info["ticks"][i])
-            t.append(nt)
-            cursors[i] += nt
-            if term[i] or trunc[i] or cursors[i] >= len(episodes[i]):
-                active[i] = False
-        obs_now = obs.copy()
-    return [(np.asarray(o, np.float32), np.asarray(a, np.float32),
-             np.asarray(r, np.float32), np.asarray(t, np.float32))
-            for (o, a, r, t) in out]
+    ticks [T]) as float32 numpy arrays — a view-per-episode over the DLL's
+    padded [k, T_max] batch (`GdVecEnv.replay`)."""
+    obs, acts, rews, ticks, n_steps = env.replay(episodes)
+    return [(obs[i, :n], acts[i, :n].astype(np.float32), rews[i, :n],
+             ticks[i, :n]) for i, n in enumerate(n_steps.tolist())]
 
 
 def returns_to_go(rewards: np.ndarray, ticks: np.ndarray, gamma: float,
                   reward_scale: float) -> np.ndarray:
-    """SMDP discounted return-to-go, in the trainer's reward units."""
-    r = rewards * reward_scale
-    g = gamma ** ticks
+    """SMDP discounted return-to-go, in the trainer's reward units.
+    Accepts [T] or [k, T] (rows scanned together; pad rows with zeros)."""
+    r = np.asarray(rewards, np.float32) * reward_scale
+    g = (gamma ** np.asarray(ticks, np.float32)).astype(np.float32)
     out = np.zeros_like(r)
-    acc = 0.0
-    for t in range(len(r) - 1, -1, -1):
-        acc = r[t] + g[t] * acc
-        out[t] = acc
+    acc = np.zeros(r.shape[:-1], np.float32)
+    for t in range(r.shape[-1] - 1, -1, -1):
+        acc = r[..., t] + g[..., t] * acc
+        out[..., t] = acc
     return out
 
 
 class SIL:
     def __init__(self, model, optimizer, device, gamma: float,
                  reward_scale: float, coef: float = 1.0,
-                 minibatch: int = 4096, steps: int = 2):
+                 minibatch: int = 4096, steps: int = 2, amp: str = "bf16"):
         self.model = model
         self.optimizer = optimizer
         self.device = device
@@ -140,6 +123,7 @@ class SIL:
         self.coef = coef
         self.minibatch = minibatch
         self.steps = steps
+        self.amp = amp
 
     def update(self, env: GdVecEnv, buffer: SILBuffer, k: int,
                rng: np.random.Generator, max_grad_norm: float = 0.5) -> dict:
@@ -151,23 +135,29 @@ class SIL:
         episodes = buffer.sample(k, rng)
         if not episodes:
             return stats
-        streams = replay(env, episodes)
-        obs = np.concatenate([s[0] for s in streams])
-        acts = np.concatenate([s[1] for s in streams])
-        rets = np.concatenate([
-            returns_to_go(s[2], s[3], self.gamma, self.reward_scale)
-            for s in streams])
-        t_obs = torch.as_tensor(obs, device=self.device)
-        t_acts = torch.as_tensor(acts, device=self.device)
-        t_rets = torch.as_tensor(rets, device=self.device)
+        obs, acts, rews, ticks, n_steps = env.replay(episodes)
+        # Returns over the padded [k, T] batch (pad rows are zero reward and
+        # sit after the episode end, so they never leak into valid steps),
+        # then keep only the valid rows.
+        rets = returns_to_go(rews, ticks, self.gamma, self.reward_scale)
+        valid = np.arange(obs.shape[1])[None, :] < n_steps[:, None]
+        t_obs = torch.as_tensor(obs[valid], device=self.device)
+        t_acts = torch.as_tensor(acts[valid].astype(np.float32),
+                                 device=self.device)
+        t_rets = torch.as_tensor(rets[valid], device=self.device)
         n = t_obs.shape[0]
         stats["sil_n"] = n
+        loss_sum = torch.zeros((), device=self.device)
+        pos_sum = torch.zeros((), device=self.device)
         for _ in range(self.steps):
-            idx = torch.randint(n, (min(self.minibatch, n),),
-                                device=self.device)
-            logprob, _, value = self.model.evaluate(t_obs[idx], t_acts[idx])
+            # Fixed minibatch shape (sampling with replacement, so n <
+            # minibatch just repeats rows): a shape that varied with the
+            # replayed episode count made cudnn.benchmark re-autotune the
+            # convs every update (~2 s each).
+            idx = torch.randint(n, (self.minibatch,), device=self.device)
+            with autocast_ctx(self.device, self.amp):
+                logprob, _, value = self.model.evaluate(t_obs[idx], t_acts[idx])
             adv = (t_rets[idx] - value).clamp(min=0.0)
-            frac_pos = (adv > 0).float().mean()
             loss = self.coef * (-(logprob * adv.detach()).mean()
                                 + 0.5 * (adv ** 2).mean())
             self.optimizer.zero_grad(set_to_none=True)
@@ -175,6 +165,8 @@ class SIL:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(),
                                            max_grad_norm)
             self.optimizer.step()
-            stats["sil_loss"] += loss.item() / self.steps
-            stats["sil_frac_pos"] += frac_pos.item() / self.steps
+            loss_sum += loss.detach()
+            pos_sum += (adv > 0).float().mean()
+        stats["sil_loss"] = loss_sum.item() / self.steps
+        stats["sil_frac_pos"] = pos_sum.item() / self.steps
         return stats

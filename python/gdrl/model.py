@@ -28,18 +28,57 @@ Architectures:
   scalars on a parallel branch (obs.hpp records that diffuse grid signal
   loses to O(1) scalars in a flat net; keep both paths explicit).
 - "mlp": the original flat net, kept as an A/B fallback.
+
+Precision (measured on an RTX 4060 Ti, minibatch 8192): the fp32 NCHW
+fwd+bwd is 37 ms, dominated by cuDNN's weight-gradient kernels for the
+tiny-channel convs; bf16 autocast with channels_last conv tensors is 16 ms.
+The trunks therefore run under autocast (see `autocast_ctx`) while the heads,
+the logit bound and every loss stay fp32 — bf16 logits would inject ~1e-2
+noise straight into PPO's probability ratios. The Bernoulli math is written
+out by hand (`torch.distributions` adds an argument-validation device sync
+per call and ~10% time).
 """
 
 from __future__ import annotations
 
+import contextlib
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 # Grid geometry, mirroring obs.hpp (kGridRows/kGridCols, two channels:
 # solid then hazard, each [row][col] row-major — so the flat obs tail
 # reshapes to (2, rows, cols) as a pure view).
 GRID_CH, GRID_ROWS, GRID_COLS = 2, 24, 32
 GRID_DIM = GRID_CH * GRID_ROWS * GRID_COLS
+
+AMP_MODES = ("bf16", "none")
+
+
+def configure_backend() -> None:
+    """One-time global torch settings for the fixed-shape conv workload."""
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+
+def autocast_ctx(device: torch.device, amp: str):
+    """Trunk-precision context: bf16 autocast on CUDA, no-op otherwise."""
+    if amp == "bf16" and device.type == "cuda":
+        return torch.autocast("cuda", dtype=torch.bfloat16)
+    if amp not in AMP_MODES:
+        raise ValueError(f"unknown amp mode {amp!r} (expected {AMP_MODES})")
+    return contextlib.nullcontext()
+
+
+def bernoulli_logprob(logit: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    return -F.binary_cross_entropy_with_logits(logit, action, reduction="none")
+
+
+def bernoulli_entropy(logit: torch.Tensor) -> torch.Tensor:
+    p = torch.sigmoid(logit)
+    return p * F.softplus(-logit) + (1.0 - p) * F.softplus(logit)
 
 
 def _ortho(layer: nn.Module, gain: float) -> nn.Module:
@@ -81,6 +120,7 @@ class _ConvTrunk(nn.Module):
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         s = obs[:, :self.scalar_dim]
         g = obs[:, self.scalar_dim:].view(-1, GRID_CH, GRID_ROWS, GRID_COLS)
+        g = g.contiguous(memory_format=torch.channels_last)
         return self.mix(torch.cat([self.scalars(s), self.conv(g)], dim=-1))
 
 
@@ -97,27 +137,31 @@ class _ActorCriticBase(nn.Module):
         self.value = _ortho(nn.Linear(feat_dim, 1), 1.0)
 
     def forward(self, obs: torch.Tensor):
-        raw = self.policy(self.pi_body(obs)).squeeze(-1)
-        logit = self.logit_bound * torch.tanh(raw / self.logit_bound)
-        value = self.value(self.vf_body(obs)).squeeze(-1)
+        pi_feat = self.pi_body(obs)
+        vf_feat = self.vf_body(obs)
+        # Heads + bound in fp32 regardless of the trunk autocast state.
+        with torch.autocast(obs.device.type, enabled=False):
+            raw = self.policy(pi_feat.float()).squeeze(-1)
+            logit = self.logit_bound * torch.tanh(raw / self.logit_bound)
+            value = self.value(vf_feat.float()).squeeze(-1)
         return logit, value
 
     @torch.no_grad()
     def act(self, obs: torch.Tensor, deterministic: bool = False):
+        """Returns one stacked [3, N] fp32 tensor: action, logprob, value —
+        one tensor so the rollout does a single device->host copy per step."""
         logit, value = self(obs)
         if deterministic:
             action = (logit > 0).float()
             logprob = torch.zeros_like(logit)
         else:
-            dist = torch.distributions.Bernoulli(logits=logit)
-            action = dist.sample()
-            logprob = dist.log_prob(action)
-        return action, logprob, value
+            action = (torch.rand_like(logit) < torch.sigmoid(logit)).float()
+            logprob = bernoulli_logprob(logit, action)
+        return torch.stack([action, logprob, value])
 
     def evaluate(self, obs: torch.Tensor, actions: torch.Tensor):
         logit, value = self(obs)
-        dist = torch.distributions.Bernoulli(logits=logit)
-        return dist.log_prob(actions), dist.entropy(), value
+        return bernoulli_logprob(logit, actions), bernoulli_entropy(logit), value
 
 
 class ActorCritic(_ActorCriticBase):
@@ -140,6 +184,9 @@ class ConvActorCritic(_ActorCriticBase):
                              f"{GRID_DIM} — obs.hpp/model.py mismatch")
         super().__init__(_ConvTrunk(scalar_dim), _ConvTrunk(scalar_dim), 256,
                          logit_bound)
+        # channels_last conv weights: keys/shapes unchanged, so checkpoints
+        # from the NCHW era load as-is.
+        self.to(memory_format=torch.channels_last)
 
 
 def make_model(obs_dim: int, arch: str = "cnn",
@@ -149,3 +196,77 @@ def make_model(obs_dim: int, arch: str = "cnn",
     if arch == "mlp":
         return ActorCritic(obs_dim, logit_bound=logit_bound)
     raise ValueError(f"unknown arch {arch!r} (expected 'cnn' or 'mlp')")
+
+
+class GraphedAct:
+    """CUDA-graph replay of `model.act` for a fixed batch: the rollout's
+    per-step forward is ~30 small kernels whose launch overhead exceeds
+    their GPU time. Call with the rollout batch already copied into
+    `self.obs` (the graph's static input); returns the static [3, N]
+    output (read it before the next call). Re-captures when the model's
+    logit bound changes (polish phase) — it is baked into the graph as a
+    constant. RNG inside the capture is graph-safe (fresh samples per
+    replay). Falls back to eager if capture fails."""
+
+    def __init__(self, model: _ActorCriticBase, n: int, obs_dim: int,
+                 device: torch.device, amp: str):
+        self.model = model
+        self.amp = amp
+        self.device = device
+        self.obs = torch.zeros(n, obs_dim, device=device)
+        self.out: torch.Tensor | None = None
+        self.graph: torch.cuda.CUDAGraph | None = None
+        self.bound: float | None = None
+        self.enabled = device.type == "cuda"
+
+    def _eager(self) -> torch.Tensor:
+        with autocast_ctx(self.device, self.amp):
+            return self.model.act(self.obs)
+
+    def _capture(self) -> None:
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self._eager()
+        torch.cuda.current_stream().wait_stream(s)
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            self.out = self._eager()
+        self.graph = g
+        self.bound = self.model.logit_bound
+
+    def __call__(self) -> torch.Tensor:
+        if not self.enabled:
+            return self._eager()
+        if self.graph is None or self.bound != self.model.logit_bound:
+            try:
+                self._capture()
+            except Exception as e:  # noqa: BLE001
+                print(f"WARNING: CUDA graph capture of act() failed "
+                      f"({type(e).__name__}: {e}); running eager")
+                self.enabled = False
+                return self._eager()
+        self.graph.replay()
+        return self.out
+
+
+def maybe_compile(model: _ActorCriticBase, enabled: bool) -> _ActorCriticBase:
+    """Opt-in torch.compile of the two trunks (Inductor fuses the bias+tanh
+    elementwise passes, ~20% of the update's GPU time). Needs Triton
+    (`pip install triton-windows` on Windows); any failure falls back to
+    eager with a warning rather than aborting a run."""
+    if not enabled:
+        return model
+    try:
+        import triton  # noqa: F401
+        # Compile the bound forwards, not the modules: an OptimizedModule
+        # wrapper would prefix state_dict keys with `_orig_mod.` and break
+        # checkpoint compatibility.
+        for body in (model.pi_body, model.vf_body):
+            body.forward = torch.compile(body.forward,
+                                         mode="max-autotune-no-cudagraphs")
+    except Exception as e:  # noqa: BLE001 — never let compile kill a run
+        print(f"WARNING: torch.compile unavailable ({type(e).__name__}: {e}); "
+              f"running eager")
+    return model

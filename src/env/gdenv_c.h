@@ -79,6 +79,25 @@ GDENV_API void gdenv_set_state(GdEnv* env, int32_t i, const uint8_t* buf,
                                float* obs_i);
 GDENV_API void gdenv_reset_env(GdEnv* env, int32_t i, float* obs_i);
 
+/* Batched deterministic replay of recorded episodes (SIL experience
+ * regeneration). Episodes 0..k-1 are replayed on envs 0..k-1 (k <= n_envs),
+ * each reset first; the per-tick hold bits are concatenated in `holds`,
+ * `lengths[i]` ticks each. Every decision step t < max_steps of episode i
+ * writes row i*max_steps + t of:
+ *   obs   [k][max_steps][obs_dim]  observation BEFORE the decision (or NULL)
+ *   acts  [k][max_steps] u8        the hold bit fed at that decision
+ *   rews  [k][max_steps] f32       step reward
+ *   ticks [k][max_steps] f32       sim ticks the decision consumed
+ * and n_steps[i] receives the episode's total decision count (may exceed
+ * max_steps; pass max_steps=0 for a count-only pass). Replay uses the same
+ * macro-step code as gdenv_step, so a stream is bit-identical to the episode
+ * that produced the holds. The envs are left reset; the last-finished-episode
+ * records are untouched. Returns 0, or -1 on bad arguments. */
+GDENV_API int32_t gdenv_replay(GdEnv* env, int32_t k, const uint8_t* holds,
+                               const int32_t* lengths, int32_t max_steps,
+                               float* obs, uint8_t* acts, float* rews,
+                               float* ticks, int32_t* n_steps);
+
 #ifdef __cplusplus
 }
 #endif

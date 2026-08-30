@@ -40,6 +40,12 @@ def _child() -> str:
         for buf in (obs, rew, term, trunc, info["ticks"], info["final_obs"],
                     info["final_x"], info["won"], info["episode_ticks"]):
             h.update(np.ascontiguousarray(buf).tobytes())
+    # Batched replay (gdenv_replay) of the last finished episodes must be
+    # bit-identical across thread counts too.
+    eps = [env.last_episode_holds(i) for i in range(8)]
+    eps = [e for e in eps if len(e)] or [np.ones(64, np.uint8)]
+    for buf in env.replay(eps):
+        h.update(np.ascontiguousarray(buf).tobytes())
     env.close()
     return h.hexdigest()
 
