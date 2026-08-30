@@ -179,31 +179,70 @@ def main():
     # multi-decision hold pattern: measured at the x=9026 wall, the policy's
     # own sampling passed 0/10k attempts while uniform-random actions from
     # ~300 units back passed ~2% — rare for on-policy exploration, trivial
-    # for a brute-force burst. When the all-episode frontier stalls, run
-    # random-action rollouts from banked pre-wall states and bank the states
-    # BEYOND the wall, so respawn practice immediately trains the far side
-    # and the crossing itself.
+    # for a brute-force burst.
+    #
+    # Walls come in two shapes, needing opposite action densities: ship
+    # corridors want dense holds (p≈0.5), while low overhangs (x=18645:
+    # blocks at y=75 with spikes hanging under them) are passed by NOT
+    # jumping for ~30 straight decisions — P(pass) ≈ 2^-30 at p=0.5, but
+    # certain at p=0 from a grounded pre-wall state. Each iteration
+    # therefore sweeps the hold probability, and restarts from the deepest
+    # banked states so far, so mixed walls fall incrementally (explore_chain
+    # below). Run once at startup for full-level coverage, and again on
+    # frontier stalls if coverage was lost.
     scout = GdVecEnv(args.level, 128, args.ticks_per_action, args.end_x)
     frontier_x = 0.0
     stall_count = 0
 
-    def scout_burst(frontier: float) -> tuple[int, int]:
+    def bank_deepest() -> float:
+        return max((t[0] for b in bank for t in bank[b]), default=0.0)
+
+    def explore_chain(iters: int) -> tuple[int, float]:
+        """Chained Go-Explore from self-visited states only. Each iteration
+        restarts from the deepest states banked SO FAR — including states
+        banked by earlier iterations of this same call — so long mixed walls
+        (hop onto a ledge, then a no-jump corridor) are crossed
+        incrementally, ~120 banked units per hop, rather than needing one
+        lucky action sequence end to end. Measured from scratch this covers
+        the full level in a few seconds. Returns (n_banked, deepest_x)."""
         ns = scout.n_envs
-        starts = [t for b in bank for t in bank[b]
-                  if frontier - 450.0 <= t[0] <= frontier - 60.0]
-        if not starts:
-            return 0, 0
-        banked = passes = 0
+        banked = 0
+        start_x = np.zeros(ns)
         last_bank = np.zeros(ns)
-        passed = np.zeros(ns, bool)
-        for _ in range(24):
+        if not bank:
+            # Bootstrap: random from-start rollouts (auto-reset on death).
+            scout.reset()
+            for _ in range(200):
+                acts = (rng.random(ns) < 0.5).astype(np.uint8)
+                scout.step(acts)
+                rs = scout.get_render_states()
+                for i in range(ns):
+                    if rs[i, 0] > 400.0 and rs[i, 4] == 0.0:
+                        bank_add(float(rs[i, 0]), scout.get_state(i))
+                        banked += 1
+        deep_prev, stale = 0.0, 0
+        for it in range(iters):
+            p_hold = (0.5, 0.25, 0.1, 0.0)[it % 4]
+            deep = bank_deepest()
+            if deep >= env.end_x - 200.0:
+                break
+            # three full p-hold sweeps without gaining depth -> stuck/done
+            stale = stale + 1 if deep <= deep_prev + 1.0 else 0
+            if stale >= 12:
+                break
+            deep_prev = deep
+            starts = [t for b in bank for t in bank[b]
+                      if deep - 450.0 <= t[0] <= deep]
+            if not starts:
+                break
             for i in range(ns):
-                scout.set_state(i, starts[int(rng.integers(len(starts)))][1])
+                x0, blob = starts[int(rng.integers(len(starts)))]
+                scout.set_state(i, blob)
+                start_x[i] = x0
             alive = np.ones(ns, bool)
-            last_bank[:] = frontier - 60.0
-            passed[:] = False
+            last_bank[:] = start_x
             for _ in range(160):
-                acts = rng.integers(0, 2, ns).astype(np.uint8)
+                acts = (rng.random(ns) < p_hold).astype(np.uint8)
                 _, _, sterm, strunc, _ = scout.step(acts)
                 alive &= ~(sterm | strunc).astype(bool)
                 if not alive.any():
@@ -211,16 +250,18 @@ def main():
                 rs = scout.get_render_states()
                 for i in np.nonzero(alive)[0]:
                     x = float(rs[i, 0])
-                    if x > frontier + 60.0 and not passed[i]:
-                        passed[i] = True
-                        passes += 1
                     if x > last_bank[i] + 120.0:
                         bank_add(x, scout.get_state(int(i)))
                         last_bank[i] = x
                         banked += 1
-            if banked >= 48:
-                break
-        return banked, passes
+        return banked, bank_deepest()
+
+    # Startup coverage: run the chained explorer once so the respawn bank
+    # spans everything randomly reachable before the first update. Pure
+    # exploration — the bank never holds a state the agent didn't reach.
+    n_banked, deep0 = explore_chain(600)
+    print(f"explore: banked {n_banked} states, deepest x {deep0:.0f} "
+          f"({100 * deep0 / env.end_x:.1f}% of level)")
 
     for update in range(start_update, args.updates):
         window_final_x = []
@@ -331,21 +372,22 @@ def main():
                          "win_rate": win_rate, "sps": sps}.items():
                 tb.add_scalar(k, v, global_ticks)
 
-        # Frontier stall -> scout burst (see scout_burst above).
+        # Frontier stall -> re-run the chained explorer, but only when the
+        # bank doesn't already extend past the stuck wall (bucket FIFO churn
+        # or a fresh resume can lose far coverage). If coverage exists, a
+        # stall is a learning problem, not an exploration problem — respawn
+        # practice already trains both sides of the wall.
         if window_reach > frontier_x + 30.0:
             frontier_x = window_reach
             stall_count = 0
         else:
             stall_count += 1
         if stall_count >= 6 and frontier_x > 1000.0:
-            n_banked, n_pass = scout_burst(frontier_x)
-            if n_pass:
-                print(f"upd {update:4d} | SCOUT: wall at {frontier_x:.0f} "
-                      f"cracked — {n_pass} random-rollout passes, banked "
-                      f"{n_banked} states beyond it")
-            elif n_banked:
-                print(f"upd {update:4d} | SCOUT: no pass at {frontier_x:.0f} "
-                      f"yet, banked {n_banked} probe states")
+            if bank_deepest() < frontier_x + 500.0:
+                n_banked, deep = explore_chain(48)
+                print(f"upd {update:4d} | EXPLORE: stall at "
+                      f"{frontier_x:.0f}, banked {n_banked} states, deepest "
+                      f"now {deep:.0f}")
             stall_count = 0
 
         if recorder.wins:
