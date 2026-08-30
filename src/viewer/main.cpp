@@ -6,11 +6,16 @@
 //
 // Usage: viewer [level.txt] [--res <ResourcesDir>] [--camx N] [--zoom Z]
 //               [--shot out.png] [--play] [--music-offset seconds]
+//               [--watch <live.bin>] [--replay <file.gdtrace>]
 //   --music-offset shifts song time vs sim time (positive = skip the song
 //   ahead, like the game's own ms offset setting; compensates output latency).
 //   --shot renders a few frames (Browse mode), saves a screenshot, and exits
 //   (for automated visual checks).
-// Keys: TAB / 1 / 2 = switch mode (Browse / Play)
+//   --watch starts in the training view: all live PPO envs as ghost cubes
+//   (trainer must run with --watch to publish runs/<name>/live.bin).
+//   --replay starts in the replay view: every episode in the .gdtrace
+//   re-simulated in lockstep as a ghost.
+// Keys: TAB / 1 / 2 / 3 [/ 4] = mode (Browse / Play / Training [/ Replay])
 //       T = textured/shapes toggle, D = debug markers (triggers, unknowns)
 //       F11 = borderless fullscreen
 
@@ -18,6 +23,7 @@
 #include "core/level.hpp"
 #include "viewer/gd_frames.hpp"
 #include "viewer/modes.hpp"
+#include "viewer/modes_rl.hpp"
 #include "viewer/world.hpp"
 
 #include "raylib.h"
@@ -33,6 +39,7 @@ static const char* kDefaultLevel =
 int main(int argc, char** argv) {
     std::string levelPath = kDefaultLevel;
     std::string shotPath, resDirOverride;
+    std::string livePath = "runs/run/live.bin", replayPath;
     float camX = 0.0f, zoom = 1.5f, musicOffset = 0.0f;
     int startMode = 0;  // 0 = Browse (default, keeps --shot automation), 1 = Play
     for (int i = 1; i < argc; ++i) {
@@ -41,6 +48,8 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--zoom") && i + 1 < argc) zoom = std::strtof(argv[++i], nullptr);
         else if (!std::strcmp(argv[i], "--res") && i + 1 < argc) resDirOverride = argv[++i];
         else if (!std::strcmp(argv[i], "--play")) startMode = 1;
+        else if (!std::strcmp(argv[i], "--watch") && i + 1 < argc) { livePath = argv[++i]; startMode = 2; }
+        else if (!std::strcmp(argv[i], "--replay") && i + 1 < argc) { replayPath = argv[++i]; startMode = 3; }
         else if (!std::strcmp(argv[i], "--music-offset") && i + 1 < argc) musicOffset = std::strtof(argv[++i], nullptr);
         else levelPath = argv[i];
     }
@@ -152,8 +161,11 @@ int main(int argc, char** argv) {
 
     gdv::BrowseMode browse(camX, zoom);
     gdv::PlayMode play;
-    gdv::Mode* modes[] = {&browse, &play};
-    constexpr int kModeCount = 2;
+    gdv::TrainingViewMode training(livePath);
+    gdv::ReplayMode replay(replayPath);
+    gdv::Mode* modes[] = {&browse, &play, &training, &replay};
+    // Replay is only reachable when a trace was given (no default file).
+    const int kModeCount = replayPath.empty() ? 3 : 4;
     int cur = startMode;
     modes[cur]->enter(app);
 
@@ -163,6 +175,8 @@ int main(int argc, char** argv) {
         if (IsKeyPressed(KEY_TAB)) want = (cur + 1) % kModeCount;
         if (IsKeyPressed(KEY_ONE)) want = 0;
         if (IsKeyPressed(KEY_TWO)) want = 1;
+        if (IsKeyPressed(KEY_THREE)) want = 2;
+        if (IsKeyPressed(KEY_FOUR) && kModeCount > 3) want = 3;
         if (want != cur) { modes[cur]->exit(app); cur = want; modes[cur]->enter(app); }
         if (IsKeyPressed(KEY_T) && app.textured) app.useTextures = !app.useTextures;
         if (IsKeyPressed(KEY_D)) app.debugMarkers = !app.debugMarkers;
@@ -173,7 +187,7 @@ int main(int argc, char** argv) {
 
         BeginDrawing();
         modes[cur]->draw(app);
-        DrawText(TextFormat("[%s]   TAB/1/2: mode   T: textures   D: debug   F11: fullscreen",
+        DrawText(TextFormat("[%s]   TAB/1-4: mode   T: textures   D: debug   F11: fullscreen",
                             modes[cur]->name()),
                  12, GetScreenHeight() - 24, 16, Color{170, 175, 200, 255});
         EndDrawing();

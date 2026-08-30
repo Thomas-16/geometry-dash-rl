@@ -85,7 +85,12 @@ void drawFrameAt(const Atlas& atlas, const AtlasFrame& f, Vector2 worldCenter,
 
 // Cube at engine coords: world = {s.x, -(s.y - 90)} (engine y = level y + 90,
 // screen y = -level y). Sprite when available and textures on, else a colored
-// rect. rotationDeg is cosmetic-only — never physics.
-void drawPlayer(const App& app, const gdcore::PlayerState& s, float rotationDeg);
+// rect. rotationDeg is cosmetic-only — never physics. primary/secondary tint
+// the two icon layers (defaults = the classic green/cyan); alpha multiplies
+// both, letting training/replay views draw translucent ghosts.
+void drawPlayer(const App& app, const gdcore::PlayerState& s, float rotationDeg,
+                Color primary = {0, 255, 0, 255},
+                Color secondary = {0, 255, 255, 255},
+                unsigned char alpha = 255);
 
 }  // namespace gdv

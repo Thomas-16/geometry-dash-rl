@@ -4,3 +4,5 @@ assets/
 
 .tools/
 __pycache__/
+runs/
+.venv/

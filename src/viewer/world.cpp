@@ -361,7 +361,13 @@ void drawFrameAt(const Atlas& atlas, const AtlasFrame& f, Vector2 worldCenter,
     }
 }
 
-void drawPlayer(const App& app, const gdcore::PlayerState& s, float rotationDeg) {
+void drawPlayer(const App& app, const gdcore::PlayerState& s, float rotationDeg,
+                Color primary, Color secondary, unsigned char alpha) {
+    auto fade = [alpha](Color c) {
+        c.a = static_cast<unsigned char>(c.a * alpha / 255);
+        return c;
+    };
+    Color pri = fade(primary), sec = fade(secondary);
     Vector2 c{s.x, -(s.y - 90.0f)};
     if (app.useTextures && s.ship && app.shipFrame1) {
         // Ship: the cube rides inside at 0.55 scale, 5 units above center
@@ -372,25 +378,24 @@ void drawPlayer(const App& app, const gdcore::PlayerState& s, float rotationDeg)
         if (app.playerFrame1) {
             if (app.playerFrame2)
                 drawFrameAt(app.atlas, *app.playerFrame2, cc, rotationDeg,
-                            app.iconScale * 0.55f, Color{0, 255, 255, 255});
+                            app.iconScale * 0.55f, sec);
             drawFrameAt(app.atlas, *app.playerFrame1, cc, rotationDeg,
-                        app.iconScale * 0.55f, Color{0, 255, 0, 255});
+                        app.iconScale * 0.55f, pri);
         }
         if (app.shipFrame2)
             drawFrameAt(app.atlas, *app.shipFrame2, c, rotationDeg,
-                        app.iconScale, Color{0, 255, 255, 255});
+                        app.iconScale, sec);
         drawFrameAt(app.atlas, *app.shipFrame1, c, rotationDeg,
-                    app.iconScale, Color{0, 255, 0, 255});
+                    app.iconScale, pri);
     } else if (app.useTextures && app.playerFrame1) {
-        // Default cube: secondary (cyan) layer under primary (green).
+        // Default cube: secondary layer under primary.
         if (app.playerFrame2)
             drawFrameAt(app.atlas, *app.playerFrame2, c, rotationDeg,
-                        app.iconScale, Color{0, 255, 255, 255});
+                        app.iconScale, sec);
         drawFrameAt(app.atlas, *app.playerFrame1, c, rotationDeg,
-                    app.iconScale, Color{0, 255, 0, 255});
+                    app.iconScale, pri);
     } else {
-        DrawRectanglePro({c.x, c.y, 30, 30}, {15, 15}, rotationDeg,
-                         Color{0, 230, 120, 255});
+        DrawRectanglePro({c.x, c.y, 30, 30}, {15, 15}, rotationDeg, pri);
         // outline via rotated corners (screen space, clockwise rotation)
         float t = rotationDeg * DEG2RAD;
         float ct = std::cos(t), st = std::sin(t);
@@ -399,7 +404,7 @@ void drawPlayer(const App& app, const gdcore::PlayerState& s, float rotationDeg)
         };
         Vector2 p[4] = {corner(-15, -15), corner(15, -15), corner(15, 15), corner(-15, 15)};
         for (int i = 0; i < 4; ++i)
-            DrawLineEx(p[i], p[(i + 1) % 4], 2.0f, Color{10, 60, 30, 255});
+            DrawLineEx(p[i], p[(i + 1) % 4], 2.0f, fade(Color{10, 60, 30, 255}));
     }
 }
 
