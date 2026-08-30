@@ -34,6 +34,15 @@ def holds_to_ranges(holds: np.ndarray) -> list[list[int]]:
     return ranges
 
 
+def level_id_of(level_path: str | None) -> int:
+    """Numeric id of an official level file (Resources/levels/<id>.txt);
+    None = GdVecEnv's default, Stereo Madness (1). -1 if not numeric."""
+    if level_path is None:
+        return 1
+    stem = Path(level_path).stem
+    return int(stem) if stem.isdigit() else -1
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("checkpoint")
@@ -99,6 +108,7 @@ def main():
         best = det_ep if det_ep.won else wins[0]
         sol = {
             "tps": traces.TPS,
+            "level_id": level_id_of(args.level),
             "level_end_x": float(env.end_x),
             "n_ticks": int(len(best.holds)),
             "deterministic_policy": bool(det_ep.won),

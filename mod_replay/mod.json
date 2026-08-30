@@ -1,0 +1,43 @@
+{
+    "geode": "5.10.0",
+    "gd": {
+        "win": "2.2081"
+    },
+    "id": "fang.rl-replay",
+    "name": "RL Replay",
+    "version": "v0.1.0",
+    "developer": "Thomas",
+    "description": "Open-loop replay of RL-solved input sequences (solution.json) tick-for-tick in the real game. Proves the training replica is exact.",
+    "settings": {
+        "enabled": {
+            "name": "Enabled",
+            "description": "Arm the replayer. F8 toggles this in-game.",
+            "type": "bool",
+            "default": true
+        },
+        "solutions-dir": {
+            "name": "Solutions directory",
+            "description": "Folder holding <levelID>.json solutions (from python -m gdrl.deploy). Empty = <mod save dir>/solutions.",
+            "type": "string",
+            "default": ""
+        },
+        "block-input": {
+            "name": "Block human input",
+            "description": "Drop your own jump presses while a replay is armed.",
+            "type": "bool",
+            "default": true
+        },
+        "log-trace": {
+            "name": "Log trace CSV",
+            "description": "Write a format=3 per-tick trace (same schema as the trace-logger mod) for trace_check.",
+            "type": "bool",
+            "default": true
+        },
+        "auto-retry": {
+            "name": "Auto-retry after death",
+            "description": "Keep replaying on every restart. Off = disarm after the first death so its trace is preserved.",
+            "type": "bool",
+            "default": false
+        }
+    }
+}

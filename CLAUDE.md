@@ -38,3 +38,18 @@ cmake -S . -B build -G Ninja && cmake --build build
 - **Regression bar for RL changes**: a default `python -m gdrl.train` run must still beat Stereo Madness (deterministic `det ... WIN` line / `wins.gdtrace`), and `python -m gdrl.eval runs/<name>/ckpt_best_det.pt` must write a `solution.json`. Don't shrink `--updates` for the check — it compresses the lr/entropy anneal and changes the learning trajectory.
 - Hyperparameter defaults live in `PPOConfig` (`python/gdrl/ppo.py`); the train.py CLI mirrors them — never introduce a second default.
 - **Performance contract**: trunks run under bf16 autocast with channels_last conv tensors (`--amp bf16`, default; `--amp none` = fp32); heads, logit bound and losses stay fp32 — keep it that way (bf16 logits inject noise into PPO ratios). The Bernoulli math is closed-form (`model.py`), not `torch.distributions`. `--compile` is opt-in and needs Triton (`pip install triton-windows`). Det eval runs off-thread (`DetEvaluator`); SIL replay is one DLL call (`gdenv_replay`). Before/after any perf change run `python -m gdrl.bench --compare <baseline.json>` (from `python/`) and check the per-phase `t_rollout/t_update/t_sil/t_det_wait/t_ckpt` columns in `log.csv`.
+
+## Geode mods (mod/ = trace logger, mod_replay/ = open-loop replayer)
+
+Both build with MSVC (VS 2026), not MSYS2; Geode SDK at `$GEODE_SDK`, CLI in `.tools\geode-cli` (gitignored). The build auto-installs the `.geode` into the game:
+
+```
+& "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -SkipAutomaticLocation
+$env:GEODE_SDK = "C:\Users\fangj\Geode"; $env:Path = "E:\Github\geometry-dash-rl\.tools\geode-cli;$env:Path"
+cmake -S mod_replay -B mod_replay/build -G Ninja -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build mod_replay/build
+```
+
+- **Sim-to-real loop**: `python -m gdrl.eval runs/<name>/ckpt_best_det.pt` → `python -m gdrl.deploy runs/<name>` (re-verifies the raw holds win via `env_check run`, then installs `<level_id>.json` into the mod's `solutions/`) → play the level in GD (normal mode, no start pos, click-between-frames off) → the mod writes `traces/attempt_NNNN.csv` + `result_NNNN.json` in its save dir → `build/trace_check.exe <that csv>` names the first divergent tick on a desync; `python -m gdrl.deploy --check-trace <csv> runs/<name>` asserts the recorded holds equal the solution.
+- **Tick contract**: real tick t = t-th `GJBaseGameLayer::processCommands` after `PlayLayer::resetLevel` (trace row t). **Sim tick t = real tick t+1** — the real game's tick 0 is a pre-movement input tick (row 0 has x=0) while sim step 0 already moves the player. So the replayer injects `holds[t-1]` at real tick t, `trace_check` applies row i's hold to sim step i-1, and `deploy --check-trace` compares the same way. Getting this wrong = one-tick-early jumps that clip blocks (first real-game run died at 54.8% this way). `solution.json` ranges are `[start,end)` in sim ticks; `env_check run` ranges are inclusive sim ticks (deploy.py converts).
+- Raw addresses in both mods are GD **2.2081 Windows** only.
