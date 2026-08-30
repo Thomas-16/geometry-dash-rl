@@ -155,16 +155,78 @@ def main():
     # stats, traces, and win certificates.
     from collections import deque
     rng = np.random.default_rng(0)
-    bank: dict[int, list[np.ndarray]] = {}
+    bank: dict[int, list[tuple[float, np.ndarray]]] = {}  # bucket -> (x, blob)
     kBucket = 500.0
+    kBankCap = 16
     recent_deaths: deque[float] = deque(maxlen=256)
     from_start = np.ones(env.n_envs, bool)
     collapse_count = 0
+
+    def bank_add(x: float, blob: np.ndarray):
+        blobs = bank.setdefault(int(x // kBucket), [])
+        blobs.append((x, blob))
+        if len(blobs) > kBankCap:
+            blobs.pop(0)
+
+    def bank_pick(lo: float, hi: float):
+        """A random banked blob with x in [lo, hi], or None."""
+        b0, b1 = int(max(lo, 0.0) // kBucket), int(max(hi, 0.0) // kBucket)
+        cands = [t for b in range(b0, b1 + 1) for t in bank.get(b, ())
+                 if lo <= t[0] <= hi]
+        return cands[int(rng.integers(len(cands)))][1] if cands else None
+
+    # Frontier-stall scout (Go-Explore style). Ship walls need a coordinated
+    # multi-decision hold pattern: measured at the x=9026 wall, the policy's
+    # own sampling passed 0/10k attempts while uniform-random actions from
+    # ~300 units back passed ~2% — rare for on-policy exploration, trivial
+    # for a brute-force burst. When the all-episode frontier stalls, run
+    # random-action rollouts from banked pre-wall states and bank the states
+    # BEYOND the wall, so respawn practice immediately trains the far side
+    # and the crossing itself.
+    scout = GdVecEnv(args.level, 128, args.ticks_per_action, args.end_x)
+    frontier_x = 0.0
+    stall_count = 0
+
+    def scout_burst(frontier: float) -> tuple[int, int]:
+        ns = scout.n_envs
+        starts = [t for b in bank for t in bank[b]
+                  if frontier - 450.0 <= t[0] <= frontier - 60.0]
+        if not starts:
+            return 0, 0
+        banked = passes = 0
+        last_bank = np.zeros(ns)
+        passed = np.zeros(ns, bool)
+        for _ in range(24):
+            for i in range(ns):
+                scout.set_state(i, starts[int(rng.integers(len(starts)))][1])
+            alive = np.ones(ns, bool)
+            last_bank[:] = frontier - 60.0
+            passed[:] = False
+            for _ in range(160):
+                acts = rng.integers(0, 2, ns).astype(np.uint8)
+                _, _, sterm, strunc, _ = scout.step(acts)
+                alive &= ~(sterm | strunc).astype(bool)
+                if not alive.any():
+                    break
+                rs = scout.get_render_states()
+                for i in np.nonzero(alive)[0]:
+                    x = float(rs[i, 0])
+                    if x > frontier + 60.0 and not passed[i]:
+                        passed[i] = True
+                        passes += 1
+                    if x > last_bank[i] + 120.0:
+                        bank_add(x, scout.get_state(int(i)))
+                        last_bank[i] = x
+                        banked += 1
+            if banked >= 48:
+                break
+        return banked, passes
 
     for update in range(start_update, args.updates):
         window_final_x = []
         window_wins = 0
         window_ep_ticks = []
+        window_reach = 0.0  # max final_x over ALL episodes (respawned too)
         buf.reset()
         for step_i in range(cfg.rollout_steps):
             action, logprob, value = model.act(obs)
@@ -196,6 +258,9 @@ def main():
                 window_ep_ticks.extend(
                     info["episode_ticks"][done_fs].tolist())
                 best_x = max(best_x, float(fx.max()))
+            if done.any():
+                window_reach = max(window_reach,
+                                   float(info["final_x"][done].max()))
             total_episodes += int(done.sum())
 
             # Bank a few live snapshots; respawn dead envs from the bank.
@@ -204,31 +269,24 @@ def main():
                 for i in rng.choice(env.n_envs, 4, replace=False):
                     x = float(rs[i, 0])
                     if x > 400.0 and not done[i] and rs[i, 4] == 0.0:
-                        b = int(x // kBucket)
-                        blobs = bank.setdefault(b, [])
-                        blobs.append(env.get_state(int(i)))
-                        if len(blobs) > 8:
-                            blobs.pop(0)
+                        bank_add(x, env.get_state(int(i)))
             for i in np.nonzero(done)[0]:
                 if not info["won"][i]:
                     recent_deaths.append(float(info["final_x"][i]))
                 if bank and rng.random() < args.respawn:
-                    buckets = sorted(bank)
+                    blob = None
                     if recent_deaths and rng.random() < 0.5:
                         # Wall practice: start a few hundred units before a
                         # recently observed death, i.e. the approach to a
                         # spot the policy currently fails.
                         dx = recent_deaths[int(rng.integers(
                             len(recent_deaths)))]
-                        target = int((dx - rng.uniform(100.0, 800.0))
-                                     // kBucket)
-                        cand = [b for b in buckets if b <= target]
-                        b = cand[-1] if cand else buckets[0]
-                    else:
-                        b = buckets[int(rng.integers(len(buckets)))]
-                    blobs = bank[b]
-                    env.set_state(int(i),
-                                  blobs[int(rng.integers(len(blobs)))])
+                        blob = bank_pick(dx - 450.0, dx - 50.0)
+                    if blob is None:
+                        buckets = sorted(bank)
+                        blobs = bank[buckets[int(rng.integers(len(buckets)))]]
+                        blob = blobs[int(rng.integers(len(blobs)))][1]
+                    env.set_state(int(i), blob)
                     from_start[i] = False
                 else:
                     from_start[i] = True
@@ -272,6 +330,23 @@ def main():
             for k, v in {**stats, "mean_final_x": mean_x, "best_x": best_x,
                          "win_rate": win_rate, "sps": sps}.items():
                 tb.add_scalar(k, v, global_ticks)
+
+        # Frontier stall -> scout burst (see scout_burst above).
+        if window_reach > frontier_x + 30.0:
+            frontier_x = window_reach
+            stall_count = 0
+        else:
+            stall_count += 1
+        if stall_count >= 6 and frontier_x > 1000.0:
+            n_banked, n_pass = scout_burst(frontier_x)
+            if n_pass:
+                print(f"upd {update:4d} | SCOUT: wall at {frontier_x:.0f} "
+                      f"cracked — {n_pass} random-rollout passes, banked "
+                      f"{n_banked} states beyond it")
+            elif n_banked:
+                print(f"upd {update:4d} | SCOUT: no pass at {frontier_x:.0f} "
+                      f"yet, banked {n_banked} probe states")
+            stall_count = 0
 
         if recorder.wins:
             traces.write(run_dir / "wins.gdtrace", recorder.wins)
@@ -317,6 +392,7 @@ def main():
           f"best x {best_x:.1f} ({100 * best_x / env.end_x:.1f}%)")
     if live:
         live.close()
+    scout.close()
     env.close()
 
 
