@@ -20,24 +20,31 @@ import torch
 
 from .env import GdVecEnv
 from .live import LiveWriter
-from .model import ActorCritic
+from .model import make_model
 from .ppo import PPO, PPOConfig, RolloutBuffer
+from . import sil
 from . import traces
+
+
+_D = PPOConfig()  # hyper defaults live in PPOConfig, the CLI mirrors them
 
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--run-name", default="run")
     p.add_argument("--level", default=None, help="level file path override")
-    p.add_argument("--n-envs", type=int, default=256)
+    # 1024 x 64 keeps the batch at 65,536 samples/update (same learning
+    # dynamics as the original 256 x 256) with 4x fewer Python<->DLL round
+    # trips; the DLL steps envs on a thread pool ($GDENV_THREADS).
+    p.add_argument("--n-envs", type=int, default=1024)
     p.add_argument("--ticks-per-action", type=int, default=4)
     p.add_argument("--end-x", type=float, default=-1.0,
                    help="early win line for curriculum runs; -1 = full level")
     p.add_argument("--updates", type=int, default=1000)
-    p.add_argument("--rollout", type=int, default=256)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--ent-coef", type=float, default=0.005)
-    p.add_argument("--gamma", type=float, default=0.9995,
+    p.add_argument("--rollout", type=int, default=_D.rollout_steps)
+    p.add_argument("--lr", type=float, default=_D.lr)
+    p.add_argument("--ent-coef", type=float, default=_D.ent_coef)
+    p.add_argument("--gamma", type=float, default=_D.gamma,
                    help="discount per sim tick (steps are variable-length; "
                         "gamma^ticks is applied per decision)")
     p.add_argument("--reward-scale", type=float, default=0.1,
@@ -56,7 +63,38 @@ def parse_args():
     p.add_argument("--trace-every", type=int, default=20,
                    help="dump episode traces every N updates")
     p.add_argument("--ckpt-every", type=int, default=50)
+    p.add_argument("--arch", choices=("cnn", "mlp"), default="cnn",
+                   help="policy/value network architecture (a resumed run "
+                        "always keeps its checkpoint's arch)")
+    p.add_argument("--det-every", type=int, default=10,
+                   help="deterministic full-run eval every N updates "
+                        "(0 = off); best result saved to ckpt_best_det.pt")
+    # Polish phase: once the stochastic policy wins regularly, the ~1.8%
+    # per-decision exploration floor (logit bound 4) is what keeps the
+    # TRAINING distribution off the argmax path — raise the bound and drop
+    # entropy/lr so PPO converges onto and fixes the deterministic path.
+    p.add_argument("--polish-wins", type=int, default=25,
+                   help="enter the polish phase after this many cumulative "
+                        "from-start wins")
+    p.add_argument("--polish-at", type=int, default=-1,
+                   help="force the polish phase at this update (-1 = by "
+                        "--polish-wins)")
+    p.add_argument("--no-polish", action="store_true")
+    p.add_argument("--sil-coef", type=float, default=1.0,
+                   help="self-imitation loss coefficient (0 = off): after "
+                        "each PPO update, replay the best recorded episodes "
+                        "through the scout env (the deterministic sim IS the "
+                        "experience buffer) and imitate positive-advantage "
+                        "transitions")
+    p.add_argument("--sil-episodes", type=int, default=8,
+                   help="episodes replayed per SIL update")
     return p.parse_args()
+
+
+POLISH_LOGIT_BOUND = 8.0
+POLISH_ENT_COEF = 1e-4
+POLISH_MAX_LR = 1e-4
+POLISH_RESPAWN = 0.25
 
 
 class EpisodeRecorder:
@@ -67,13 +105,15 @@ class EpisodeRecorder:
         self.completed: list[traces.Episode] = []
         self.wins: list[traces.Episode] = []
 
+    kMaxWins = 16  # wins are interchangeable certificates; cap the trace
+
     def record(self, done: np.ndarray, info: dict):
         for i in np.nonzero(done)[0]:
             ep = traces.Episode(self.env.last_episode_holds(int(i)),
                                 float(info["final_x"][i]),
                                 bool(info["won"][i]))
             self.completed.append(ep)
-            if ep.won:
+            if ep.won and len(self.wins) < self.kMaxWins:
                 self.wins.append(ep)
 
     def dump_best(self, path: Path, keep: int = 5, extra: int = 3):
@@ -100,7 +140,11 @@ def main():
     env = GdVecEnv(args.level, args.n_envs, args.ticks_per_action, args.end_x)
     cfg = PPOConfig(rollout_steps=args.rollout, lr=args.lr,
                     ent_coef=args.ent_coef, gamma=args.gamma)
-    model = ActorCritic(env.obs_dim)
+    ckpt = None
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        args.arch = ckpt.get("config", {}).get("arch", "mlp")
+    model = make_model(env.obs_dim, args.arch)
     algo = PPO(model, cfg, device)
     buf = RolloutBuffer(cfg.rollout_steps, env.n_envs, env.obs_dim, device)
     recorder = EpisodeRecorder(env)
@@ -108,18 +152,23 @@ def main():
     start_update = 0
     best_x = 0.0
     best_mean_x = 0.0
+    best_det_x = 0.0
     total_wins = 0
     total_episodes = 0
-    if args.resume:
-        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+    polish = False
+    if ckpt is not None:
         model.load_state_dict(ckpt["model"])
         algo.optimizer.load_state_dict(ckpt["optimizer"])
         start_update = ckpt["update"]
         best_x = ckpt.get("best_x", 0.0)
         best_mean_x = ckpt.get("best_mean_x", 0.0)
+        best_det_x = ckpt.get("best_det_x", 0.0)
         total_wins = ckpt.get("total_wins", 0)
         total_episodes = ckpt.get("total_episodes", 0)
-        print(f"resumed from {args.resume} at update {start_update}")
+        polish = ckpt.get("polish", False)
+        model.logit_bound = ckpt.get("logit_bound", model.logit_bound)
+        print(f"resumed from {args.resume} at update {start_update} "
+              f"(arch {args.arch}{', polish' if polish else ''})")
 
     (run_dir / "config.json").write_text(json.dumps(
         {**vars(args), "obs_dim": env.obs_dim, "end_x": env.end_x}, indent=2))
@@ -130,7 +179,7 @@ def main():
         log_path.write_text(
             "update,global_ticks,mean_final_x,best_final_x,best_x_ever,"
             "win_rate,episodes,mean_ep_ticks,sps,policy_loss,value_loss,"
-            "entropy,approx_kl,clip_frac,lr\n")
+            "entropy,approx_kl,clip_frac,lr,det_x,det_win\n")
     try:
         from torch.utils.tensorboard import SummaryWriter
         tb = SummaryWriter(str(run_dir / "tb"))
@@ -142,6 +191,7 @@ def main():
     obs_np = env.reset().copy()
     obs = torch.as_tensor(obs_np, device=device)
     global_ticks = 0
+    wins_written = 0
     last_live = 0.0
     t_start = time.time()
     ticks_window = 0
@@ -169,11 +219,11 @@ def main():
             blobs.pop(0)
 
     def bank_pick(lo: float, hi: float):
-        """A random banked blob with x in [lo, hi], or None."""
+        """A random banked (x, blob) with x in [lo, hi], or None."""
         b0, b1 = int(max(lo, 0.0) // kBucket), int(max(hi, 0.0) // kBucket)
         cands = [t for b in range(b0, b1 + 1) for t in bank.get(b, ())
                  if lo <= t[0] <= hi]
-        return cands[int(rng.integers(len(cands)))][1] if cands else None
+        return cands[int(rng.integers(len(cands)))] if cands else None
 
     # Frontier-stall scout (Go-Explore style). Ship walls need a coordinated
     # multi-decision hold pattern: measured at the x=9026 wall, the policy's
@@ -193,6 +243,23 @@ def main():
     scout = GdVecEnv(args.level, 128, args.ticks_per_action, args.end_x)
     frontier_x = 0.0
     stall_count = 0
+    respawn_prob = args.respawn
+
+    # Deterministic full-run eval on a dedicated 1-env handle. The argmax
+    # policy is what open-loop deployment replays, so it gets its own gate
+    # and its own best checkpoint (stochastic mean_x drives ckpt_best).
+    det_env = GdVecEnv(args.level, 1, args.ticks_per_action, args.end_x)
+
+    def det_eval() -> tuple[float, bool]:
+        obs_d = torch.as_tensor(det_env.reset().copy(), device=device)
+        while True:
+            with torch.no_grad():
+                logit, _ = model(obs_d)
+            a = (logit > 0).cpu().numpy().astype(np.uint8)
+            next_d, _, dterm, dtrunc, dinfo = det_env.step(a)
+            if dterm[0] or dtrunc[0]:
+                return float(dinfo["final_x"][0]), bool(dinfo["won"][0])
+            obs_d = torch.as_tensor(next_d, device=device).clone()
 
     def bank_deepest() -> float:
         return max((t[0] for b in bank for t in bank[b]), default=0.0)
@@ -256,9 +323,50 @@ def main():
                         banked += 1
         return banked, bank_deepest()
 
+    # Prioritized-respawn bookkeeping: per-spawn-bucket attempt/pass counts
+    # for respawned episodes, EMA-decayed so they track the current policy.
+    # "Pass" = won, or progressed a full bucket past the spawn point.
+    respawn_attempts: dict[int, float] = {}
+    respawn_passes: dict[int, float] = {}
+    respawn_x = np.full(env.n_envs, -1.0)  # spawn x; -1 = from-start
+    window_deaths: list[float] = []
+
+    sil_buf = sil.SILBuffer()
+    silu = sil.SIL(model, algo.optimizer, device, args.gamma,
+                   args.reward_scale, coef=args.sil_coef)
+    # Replay handle sized to the replay batch: gdenv steps every env in a
+    # handle, so borrowing the 128-env scout would waste 16x the sim work.
+    sil_env = (GdVecEnv(args.level, args.sil_episodes, args.ticks_per_action,
+                        args.end_x) if args.sil_coef > 0 else None)
+
+    # Restore trainer state that isn't the network: exploration coverage,
+    # respawn stats, SIL episodes, rng, and the anneal position (without it
+    # a resume restarts lr/entropy annealing from the top).
+    progress0 = 0.0
+    if ckpt is not None:
+        progress0 = ckpt.get("anneal_progress", 0.0)
+        frontier_x = ckpt.get("frontier_x", 0.0)
+        for bx, blob in ckpt.get("bank", []):
+            bank_add(bx, blob)
+        recent_deaths.extend(ckpt.get("recent_deaths", []))
+        if "rng_state" in ckpt:
+            rng.bit_generator.state = ckpt["rng_state"]
+        if "sil" in ckpt:
+            sil_buf.load_state_dict(ckpt["sil"])
+        respawn_attempts = ckpt.get("respawn_attempts", respawn_attempts)
+        respawn_passes = ckpt.get("respawn_passes", respawn_passes)
+        if bank:
+            print(f"restored bank: {sum(len(v) for v in bank.values())} "
+                  f"states, deepest {bank_deepest():.0f}; "
+                  f"anneal progress {progress0:.2f}")
+        if progress0 >= 0.999:
+            print("WARNING: resumed run's lr/entropy anneal is complete "
+                  "(lr ~= lr_final); pass --lr to keep learning")
+
     # Startup coverage: run the chained explorer once so the respawn bank
     # spans everything randomly reachable before the first update. Pure
     # exploration — the bank never holds a state the agent didn't reach.
+    # (With a restored full-coverage bank it exits immediately.)
     n_banked, deep0 = explore_chain(600)
     print(f"explore: banked {n_banked} states, deepest x {deep0:.0f} "
           f"({100 * deep0 / env.end_x:.1f}% of level)")
@@ -291,7 +399,10 @@ def main():
 
             # Progress stats and replayable traces only from x=0 episodes.
             done_fs = done & from_start
+            n_before = len(recorder.completed)
             recorder.record(done_fs, info)
+            for ep in recorder.completed[n_before:]:
+                sil_buf.add(ep.holds, ep.final_x, ep.won)
             if done_fs.any():
                 fx = info["final_x"][done_fs]
                 window_final_x.extend(fx.tolist())
@@ -305,32 +416,60 @@ def main():
             total_episodes += int(done.sum())
 
             # Bank a few live snapshots; respawn dead envs from the bank.
+            # Sample count scales with n_envs so shorter rollouts (fewer
+            # sampling steps per update) still refresh the bank at the same
+            # rate per env-step.
             if step_i % 4 == 0:
                 rs = env.get_render_states()
-                for i in rng.choice(env.n_envs, 4, replace=False):
+                for i in rng.choice(env.n_envs, max(4, env.n_envs // 64),
+                                    replace=False):
                     x = float(rs[i, 0])
                     if x > 400.0 and not done[i] and rs[i, 4] == 0.0:
                         bank_add(x, env.get_state(int(i)))
             for i in np.nonzero(done)[0]:
+                if respawn_x[i] >= 0.0:  # a respawned episode just ended
+                    b = int(respawn_x[i] // kBucket)
+                    respawn_attempts[b] = respawn_attempts.get(b, 0.0) + 1.0
+                    if (info["won"][i]
+                            or info["final_x"][i] >= respawn_x[i] + kBucket):
+                        respawn_passes[b] = respawn_passes.get(b, 0.0) + 1.0
                 if not info["won"][i]:
                     recent_deaths.append(float(info["final_x"][i]))
-                if bank and rng.random() < args.respawn:
-                    blob = None
-                    if recent_deaths and rng.random() < 0.5:
+                    window_deaths.append(float(info["final_x"][i]))
+                if bank and rng.random() < respawn_prob:
+                    picked = None
+                    u = rng.random()
+                    if u < 0.5:
+                        # Learnable zone: spawn buckets the policy passes
+                        # sometimes but not reliably — where practice moves
+                        # the needle fastest.
+                        learnable = [
+                            b for b in bank
+                            if respawn_attempts.get(b, 0.0) >= 8.0
+                            and 0.1 <= (respawn_passes.get(b, 0.0)
+                                        / respawn_attempts[b]) <= 0.8]
+                        if learnable:
+                            b = learnable[int(rng.integers(len(learnable)))]
+                            blobs = bank[b]
+                            picked = blobs[int(rng.integers(len(blobs)))]
+                    if picked is None and u < 0.75 and recent_deaths:
                         # Wall practice: start a few hundred units before a
-                        # recently observed death, i.e. the approach to a
-                        # spot the policy currently fails.
+                        # recently observed death — finds brand-new walls
+                        # before pass-rate stats exist for them.
                         dx = recent_deaths[int(rng.integers(
                             len(recent_deaths)))]
-                        blob = bank_pick(dx - 450.0, dx - 50.0)
-                    if blob is None:
+                        picked = bank_pick(dx - 450.0, dx - 50.0)
+                    if picked is None:
+                        # Uniform over the bank: retention practice.
                         buckets = sorted(bank)
                         blobs = bank[buckets[int(rng.integers(len(buckets)))]]
-                        blob = blobs[int(rng.integers(len(blobs)))][1]
-                    env.set_state(int(i), blob)
+                        picked = blobs[int(rng.integers(len(blobs)))]
+                    env.set_state(int(i), picked[1])
                     from_start[i] = False
+                    respawn_x[i] = picked[0]
                 else:
                     from_start[i] = True
+                    respawn_x[i] = -1.0
 
             step_ticks = int(info["ticks"].sum())
             global_ticks += step_ticks
@@ -343,9 +482,22 @@ def main():
                            total_episodes)
                 last_live = time.time()
 
-        progress = (update + 1 - start_update) / max(
-            args.updates - start_update, 1)
-        stats = algo.update(buf, obs, progress)
+        # Anneal position continues across resumes (progress0 from the ckpt).
+        progress = progress0 + (1.0 - progress0) * (
+            update + 1 - start_update) / max(args.updates - start_update, 1)
+        if polish:
+            lr_now = min(cfg.lr + (cfg.lr_final - cfg.lr) * progress,
+                         POLISH_MAX_LR)
+            stats = algo.update(buf, obs, progress, lr_override=lr_now,
+                                ent_override=POLISH_ENT_COEF)
+        else:
+            stats = algo.update(buf, obs, progress)
+        if sil_env is not None:
+            stats.update(silu.update(sil_env, sil_buf, args.sil_episodes,
+                                     rng, cfg.max_grad_norm))
+        for d in (respawn_attempts, respawn_passes):
+            for b in d:
+                d[b] *= 0.99  # EMA: stats track the current policy
 
         sps = ticks_window / max(time.time() - t_start, 1e-9)
         t_start, ticks_window = time.time(), 0
@@ -355,22 +507,55 @@ def main():
         max_x = float(np.max(window_final_x)) if n_eps else 0.0
         win_rate = window_wins / n_eps if n_eps else 0.0
         mean_ticks = float(np.mean(window_ep_ticks)) if n_eps else 0.0
+
+        if not polish and not args.no_polish and (
+                (args.polish_at >= 0 and update + 1 >= args.polish_at)
+                or (args.polish_at < 0 and total_wins >= args.polish_wins)):
+            polish = True
+            model.logit_bound = POLISH_LOGIT_BOUND
+            respawn_prob = min(respawn_prob, POLISH_RESPAWN)
+            print(f"upd {update:4d} | POLISH: {total_wins} wins — logit "
+                  f"bound {POLISH_LOGIT_BOUND}, ent {POLISH_ENT_COEF}, "
+                  f"lr<={POLISH_MAX_LR}, respawn {respawn_prob}")
+
+        det_x, det_win = -1.0, False
+        if args.det_every > 0 and ((update + 1) % args.det_every == 0
+                                   or update + 1 == args.updates):
+            det_x, det_win = det_eval()
+
         row = (f"{update},{global_ticks},{mean_x:.1f},{max_x:.1f},"
                f"{best_x:.1f},{win_rate:.4f},{n_eps},{mean_ticks:.0f},"
                f"{sps:.0f},{stats['policy_loss']:.4f},"
                f"{stats['value_loss']:.4f},{stats['entropy']:.4f},"
                f"{stats['approx_kl']:.5f},{stats['clip_frac']:.4f},"
-               f"{stats['lr']:.6f}")
+               f"{stats['lr']:.6f},{det_x:.1f},{int(det_win)}")
         with open(log_path, "a") as f:
             f.write(row + "\n")
+        det_str = (f" | det {det_x:7.1f}{' WIN' if det_win else ''}"
+                   if det_x >= 0 else "")
+        die_str = ""
+        if window_deaths:
+            hist: dict[int, int] = {}
+            for dxx in window_deaths:
+                hist[int(dxx // kBucket)] = hist.get(int(dxx // kBucket),
+                                                     0) + 1
+            top = sorted(hist.items(), key=lambda kv: -kv[1])[:3]
+            die_str = " | die " + " ".join(
+                f"{b * kBucket:.0f}x{c}" for b, c in top)
         print(f"upd {update:4d} | x {mean_x:7.1f} avg {max_x:7.1f} max "
               f"(best {best_x:7.1f}, {100 * best_x / env.end_x:5.1f}%) | "
               f"win {win_rate:.2%} | {sps / 1e6:.2f}M ticks/s | "
-              f"ent {stats['entropy']:.3f}")
+              f"ent {stats['entropy']:.3f}{det_str}{die_str}")
         if tb:
             for k, v in {**stats, "mean_final_x": mean_x, "best_x": best_x,
                          "win_rate": win_rate, "sps": sps}.items():
                 tb.add_scalar(k, v, global_ticks)
+            if det_x >= 0:
+                tb.add_scalar("det_x", det_x, global_ticks)
+            if window_deaths:
+                tb.add_histogram("death_x", np.asarray(window_deaths),
+                                 global_ticks)
+        window_deaths.clear()
 
         # Frontier stall -> re-run the chained explorer, but only when the
         # bank doesn't already extend past the stuck wall (bucket FIFO churn
@@ -382,7 +567,8 @@ def main():
             stall_count = 0
         else:
             stall_count += 1
-        if stall_count >= 6 and frontier_x > 1000.0:
+        if (stall_count >= 6 and frontier_x > 1000.0
+                and frontier_x < env.end_x - 200.0):
             if bank_deepest() < frontier_x + 500.0:
                 n_banked, deep = explore_chain(48)
                 print(f"upd {update:4d} | EXPLORE: stall at "
@@ -390,8 +576,9 @@ def main():
                       f"now {deep:.0f}")
             stall_count = 0
 
-        if recorder.wins:
+        if recorder.wins and len(recorder.wins) != wins_written:
             traces.write(run_dir / "wins.gdtrace", recorder.wins)
+            wins_written = len(recorder.wins)
         if (update + 1) % args.trace_every == 0:
             recorder.dump_best(run_dir / "traces" / f"upd_{update + 1:05d}.gdtrace")
 
@@ -400,9 +587,20 @@ def main():
                         "optimizer": algo.optimizer.state_dict(),
                         "update": update + 1, "best_x": best_x,
                         "best_mean_x": best_mean_x,
+                        "best_det_x": best_det_x,
                         "total_wins": total_wins,
                         "total_episodes": total_episodes,
                         "mean_final_x": mean_x,
+                        "polish": polish,
+                        "logit_bound": model.logit_bound,
+                        "anneal_progress": progress,
+                        "frontier_x": frontier_x,
+                        "bank": [t for b in bank for t in bank[b]],
+                        "recent_deaths": list(recent_deaths),
+                        "rng_state": rng.bit_generator.state,
+                        "respawn_attempts": respawn_attempts,
+                        "respawn_passes": respawn_passes,
+                        "sil": sil_buf.state_dict(),
                         "config": vars(args)}, path)
 
         # Best-so-far by window mean: a later collapse (catastrophic
@@ -410,6 +608,11 @@ def main():
         if n_eps and mean_x > best_mean_x:
             best_mean_x = mean_x
             save_ckpt(run_dir / "ckpt_best.pt")
+        # Best deterministic run gets its own checkpoint: it's the policy
+        # open-loop deployment actually replays.
+        if det_x > best_det_x:
+            best_det_x = det_x
+            save_ckpt(run_dir / "ckpt_best_det.pt")
         if (update + 1) % args.ckpt_every == 0 or update + 1 == args.updates:
             save_ckpt(run_dir / "ckpt_latest.pt")
 
@@ -434,6 +637,9 @@ def main():
           f"best x {best_x:.1f} ({100 * best_x / env.end_x:.1f}%)")
     if live:
         live.close()
+    det_env.close()
+    if sil_env is not None:
+        sil_env.close()
     scout.close()
     env.close()
 

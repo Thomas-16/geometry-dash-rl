@@ -34,6 +34,10 @@ void printObs(const float* obs) {
                 "prog=%.4f pdist=%.3f ptype=%.0f\n",
                 obs[0], obs[1], obs[2], obs[3], obs[4], obs[5], obs[6],
                 obs[7]);
+    std::printf("haz=(%.3f,%.3f) haz2=(%.3f,%.3f) step=(%.3f,%.3f) "
+                "ceil=(%.3f,%.3f) dx=%.4f\n",
+                obs[8], obs[9], obs[14], obs[15], obs[10], obs[11], obs[12],
+                obs[13], obs[16]);
     const float* solid = obs + gdenv::kPlayerDim;
     const float* hazard = solid + gdenv::kGridDim;
     // top row first; player column is col 0
@@ -75,7 +79,7 @@ int main(int argc, char** argv) {
         gdcore::PlayerState s;
         if (argc > 2) s.x = std::strtof(argv[2], nullptr);
         if (argc > 3) s.y = std::strtof(argv[3], nullptr);
-        gdenv::buildObs(s, geom, endX, obs.data());
+        gdenv::buildObs(s, geom, endX, cfg.dx, obs.data());
         std::printf("player x=%.2f y=%.2f  endX=%.2f\n", s.x, s.y, endX);
         printObs(obs.data());
         return 0;
@@ -122,7 +126,7 @@ int main(int argc, char** argv) {
                 rng = rng * 1664525u + 1013904223u;
                 bool hold = (rng >> 16) & 1;
                 gdenv::StepResult r = e.step(hold, cfg, geom, ecfg, endX);
-                gdenv::buildObs(e.s, geom, endX, obs.data());
+                gdenv::buildObs(e.s, geom, endX, cfg.dx, obs.data());
                 stream.insert(stream.end(), obs.begin(), obs.end());
                 stream.push_back(r.reward);
                 if (r.terminated || r.truncated) e.reset();

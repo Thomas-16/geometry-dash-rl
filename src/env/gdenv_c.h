@@ -23,7 +23,9 @@ typedef struct GdEnv GdEnv; /* opaque batch of n_envs independent episodes */
  * ticks_per_action: <=0 -> default 4.
  * end_x: win line; < 0 -> full level (maxObjX + 40). Lower values make
  *        truncated early-section curricula.
- * seed: reserved (the sim is deterministic); pass 0. */
+ * seed: reserved (the sim is deterministic); pass 0.
+ * Env stepping parallelism: $GDENV_THREADS total threads (1 = serial),
+ * default hardware_concurrency()-1. Bit-identical at any thread count. */
 GDENV_API GdEnv* gdenv_create(const char* level_path, int32_t n_envs,
                               int32_t ticks_per_action, float end_x,
                               uint64_t seed);
@@ -31,6 +33,7 @@ GDENV_API void gdenv_destroy(GdEnv* env);
 GDENV_API const char* gdenv_last_error(void);
 
 GDENV_API int32_t gdenv_obs_dim(const GdEnv* env);  /* kObsDim */
+GDENV_API int32_t gdenv_obs_version(void);          /* kObsVersion */
 GDENV_API int32_t gdenv_num_envs(const GdEnv* env);
 GDENV_API float gdenv_level_end_x(const GdEnv* env);
 GDENV_API int32_t gdenv_ticks_per_action(const GdEnv* env);

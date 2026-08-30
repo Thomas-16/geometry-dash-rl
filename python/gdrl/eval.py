@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 from .env import GdVecEnv
-from .model import ActorCritic
+from .model import make_model
 from . import traces
 
 
@@ -52,7 +52,9 @@ def main():
 
     n = args.episodes + 1  # env 0 acts deterministically
     env = GdVecEnv(args.level, n, args.ticks_per_action, args.end_x)
-    model = ActorCritic(env.obs_dim).to(device)
+    arch = ckpt.get("config", {}).get("arch", "mlp")
+    model = make_model(env.obs_dim, arch,
+                       ckpt.get("logit_bound", 4.0)).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 

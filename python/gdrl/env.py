@@ -14,6 +14,11 @@ import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Observation contract this code was written against (obs.hpp kObsVersion).
+# A mismatch means a stale gdenv.dll — features would silently differ from
+# what checkpoints/models assume.
+OBS_VERSION = 2
+
 
 def _find_dll() -> Path:
     override = os.environ.get("GDENV_DLL")
@@ -68,6 +73,14 @@ class GdVecEnv:
     def __init__(self, level_path: str | None = None, n_envs: int = 256,
                  ticks_per_action: int = 4, end_x: float = -1.0):
         self._dll = _load(_find_dll())
+        try:
+            v = int(self._dll.gdenv_obs_version())
+        except AttributeError:
+            v = 1  # DLL predates the version export
+        if v != OBS_VERSION:
+            raise RuntimeError(
+                f"gdenv.dll obs version {v} != expected {OBS_VERSION} — "
+                f"rebuild the DLL (cmake --build build) or update gdrl")
         path = level_path.encode() if level_path else None
         self._env = self._dll.gdenv_create(path, n_envs, ticks_per_action,
                                            end_x, 0)
@@ -118,6 +131,11 @@ class GdVecEnv:
         """[n, 5] = x, y, yvel, ship, dead."""
         self._dll.gdenv_get_render_states(self._env, self._render)
         return self._render
+
+    def reset_env(self, i: int) -> None:
+        """Reset env i to x=0; refreshes its row in the obs buffer."""
+        self._dll.gdenv_reset_env(
+            self._env, i, self._obs[i:i + 1].ctypes.data_as(C.c_void_p))
 
     def get_state(self, i: int) -> np.ndarray:
         buf = np.zeros(self._dll.gdenv_state_size(), np.uint8)

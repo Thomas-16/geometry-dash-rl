@@ -12,7 +12,10 @@ from .model import ActorCritic
 
 @dataclass
 class PPOConfig:
-    rollout_steps: int = 256
+    """Single source of hyperparameter defaults — train.py's CLI reads its
+    argparse defaults from here, never the other way around."""
+
+    rollout_steps: int = 64
     epochs: int = 4
     minibatches: int = 8
     # Discount is PER SIM TICK (steps have variable durations — a ground
@@ -23,12 +26,12 @@ class PPOConfig:
     clip: float = 0.2
     vf_clip: float = 0.2
     vf_coef: float = 0.5
-    ent_coef: float = 0.01
+    ent_coef: float = 0.005
     # Entropy floor: near-zero entropy makes every trajectory identical in a
     # deterministic env, which starves PPO of signal and makes the policy
     # brittle to one bad update (observed: mean_x 16k -> 2.4k collapses).
     ent_coef_final: float = 0.002
-    lr: float = 3e-4
+    lr: float = 1e-3
     lr_final: float = 0.0
     max_grad_norm: float = 0.5
     # Stop the epoch loop when the update drifts this far from the rollout
@@ -98,11 +101,17 @@ class PPO:
                                           eps=1e-5)
 
     def update(self, buf: RolloutBuffer, last_obs: torch.Tensor,
-               progress: float) -> dict:
-        """progress in [0,1] drives lr/entropy annealing."""
+               progress: float, lr_override: float | None = None,
+               ent_override: float | None = None) -> dict:
+        """progress in [0,1] drives lr/entropy annealing; the overrides
+        replace the annealed values for this call (polish phase)."""
         cfg = self.cfg
         lr = cfg.lr + (cfg.lr_final - cfg.lr) * progress
         ent_coef = cfg.ent_coef + (cfg.ent_coef_final - cfg.ent_coef) * progress
+        if lr_override is not None:
+            lr = lr_override
+        if ent_override is not None:
+            ent_coef = ent_override
         for g in self.optimizer.param_groups:
             g["lr"] = lr
 

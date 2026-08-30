@@ -29,3 +29,11 @@ cmake -S . -B build -G Ninja && cmake --build build
 - `gdcore` (src/core) must stay free of rendering dependencies — it becomes the headless training sim. Rendering-only concerns (e.g., the object-id → shape table) live in the viewer.
 - The viewer's shape table is presentation-only; never treat it as hitbox/collision data. Hitboxes come later from the binary (see notes).
 - Future sim work: fixed timestep only, never variable delta time (determinism requirement, see notes).
+
+## RL env contract (src/env + python/gdrl)
+
+- **Observation versioning** (`src/env/obs.hpp`): the scalar block and grid layout are frozen; changes are additive-only and bump `kObsVersion` (checked by `python/gdrl/env.py` at DLL load). Scalar `[17]` is reserved as the future mode flag; changing the grid y-band is an obs v3 decision. `obs.hpp` will be `#include`d verbatim by the Geode mod — compile-time constants only, no runtime normalization.
+- **Speed portals later change an input, not the network**: per-tick `dx` is already an obs scalar and a `buildObs` parameter.
+- **Env stepping is parallel and bit-deterministic**: `$GDENV_THREADS` total threads (1 = exact serial fallback), default `hardware_concurrency()-1`. After touching the env layer, run `./build/env_check det` AND `python -m gdrl.selftest` (from `python/`; serial-vs-threaded byte-identity).
+- **Regression bar for RL changes**: a default `python -m gdrl.train` run must still beat Stereo Madness (deterministic `det ... WIN` line / `wins.gdtrace`), and `python -m gdrl.eval runs/<name>/ckpt_best_det.pt` must write a `solution.json`. Don't shrink `--updates` for the check — it compresses the lr/entropy anneal and changes the learning trajectory.
+- Hyperparameter defaults live in `PPOConfig` (`python/gdrl/ppo.py`); the train.py CLI mirrors them — never introduce a second default.

@@ -29,7 +29,12 @@ constexpr float kCellH = 15.0f;
 constexpr float kGridYBase = 90.0f;
 constexpr float kLookahead = kGridCols * kCellW; // 480
 constexpr int kGridDim = kGridRows * kGridCols;  // per channel
-constexpr int kPlayerDim = 12;
+// Obs v2: scalars 12-17 appended (overhead solid, second hazard, dx,
+// reserved). Scalars 0-11 and the grid layout are frozen — additions bump
+// kObsVersion and only ever append. gdenv_obs_version() exposes this so the
+// Python side can refuse a stale DLL.
+constexpr int kObsVersion = 2;
+constexpr int kPlayerDim = 18;
 constexpr int kObsDim = kPlayerDim + 2 * kGridDim;
 
 namespace detail {
@@ -71,15 +76,17 @@ inline void rasterize(const std::vector<gdcore::Box>& boxes, float px,
 
 } // namespace detail
 
-// Layout: [0..7] player scalars, then the solid grid [row][col] and the
-// hazard grid [row][col], kGridDim floats each. levelEndX is the win line
-// (x at which the episode is won), used only for the progress scalar.
+// Layout: [0..kPlayerDim) player scalars, then the solid grid [row][col] and
+// the hazard grid [row][col], kGridDim floats each. levelEndX is the win
+// line (x at which the episode is won), used only for the progress scalar.
+// dx is the per-tick x advance (PhysicsConfig::dx) — constant today, an
+// input so speed portals only change a value, not the feature contract.
 //
 // The landing-pattern snap memory (hasPrevLand/prevLandX/...) is deliberately
 // not observed: its effect on x is at most +-1 unit and x itself is observed.
 inline void buildObs(const gdcore::PlayerState& s,
                      const gdcore::LevelGeometry& g, float levelEndX,
-                     float* out) {
+                     float dx, float* out) {
     out[0] = (s.y - 105.0f) / 300.0f; // 0 on ground, 0.9 at ship ceiling
     out[1] = static_cast<float>(s.yvel / 15.0);
     out[2] = s.onGround ? 1.0f : 0.0f;
@@ -106,8 +113,10 @@ inline void buildObs(const gdcore::PlayerState& s,
     // decision boundary is ~5 units wide, and smooth generalization from
     // neighboring don't-care states washes it out. These give the net the
     // critical variables directly; the Geode mod computes them identically.
-    // Next hazard ahead: nearest left edge at or past the player's back edge.
-    float hd = 1.0f, hdy = 0.0f;
+    // Next two hazards ahead: nearest left edges at or past the player's
+    // back edge. The second (obs v2) tells the net whether the landing zone
+    // after the first threat is itself threatened.
+    float hd = 1.0f, hdy = 0.0f, h2d = 1.0f, h2dy = 0.0f;
     {
         auto hit = std::lower_bound(
             g.hazards.begin(), g.hazards.end(), s.x - 15.0f,
@@ -115,6 +124,11 @@ inline void buildObs(const gdcore::PlayerState& s,
         if (hit != g.hazards.end() && hit->left - s.x < kLookahead) {
             hd = std::max(0.0f, hit->left - s.x) / kLookahead;
             hdy = (hit->bottom - s.y) / 300.0f;
+            ++hit;
+            if (hit != g.hazards.end() && hit->left - s.x < kLookahead) {
+                h2d = std::max(0.0f, hit->left - s.x) / kLookahead;
+                h2dy = (hit->bottom - s.y) / 300.0f;
+            }
         }
     }
     // Next step-up solid ahead: nearest face whose top is above the player's
@@ -132,10 +146,35 @@ inline void buildObs(const gdcore::PlayerState& s,
             }
         }
     }
+    // Next overhead solid ahead (obs v2): nearest face whose bottom is above
+    // the player — the down-facing mirror of the step-up scan. This is the
+    // ship-corridor ceiling the grid renders too diffusely.
+    float cd = 1.0f, ch = 0.0f;
+    {
+        auto cit = std::lower_bound(
+            g.solids.begin(), g.solids.end(), s.x,
+            [](const gdcore::Box& b, float v) { return b.left < v; });
+        for (; cit != g.solids.end() && cit->left - s.x < kLookahead; ++cit) {
+            if (cit->bottom > s.y + 6.0f) {
+                cd = (cit->left - s.x) / kLookahead;
+                ch = (cit->bottom - s.y) / 300.0f;
+                break;
+            }
+        }
+    }
     out[8] = hd;
     out[9] = hdy;
     out[10] = wd;
     out[11] = wh;
+    out[12] = cd;
+    out[13] = ch;
+    out[14] = h2d;
+    out[15] = h2dy;
+    // Speed as a feature: constant while every level runs at one dx, but the
+    // slot means speed portals later change an input, not the network.
+    out[16] = dx / 2.0f;
+    out[17] = 0.0f; // reserved (future mode flag) — keeps the next obs
+                    // version from being a dim break
 
     float* grid = out + kPlayerDim;
     std::memset(grid, 0, sizeof(float) * 2 * kGridDim);
