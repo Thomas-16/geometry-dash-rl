@@ -1,136 +1,60 @@
-// Level viewer/player: renders a decoded level with the game's own sprites,
-// loaded at runtime from the GD install (never bundled), and lets you play it
-// with the bit-exact gdcore physics. Falls back to colored shapes when the
-// atlases are unavailable. All render tables are presentation-only —
-// collision truth is gdcore::LevelGeometry (see gd-replica-notes.md).
+// Level viewer/player + RL control panel: renders a decoded level with the
+// game's own sprites, loaded at runtime from the GD install (never bundled),
+// lets you play it with the bit-exact gdcore physics, replays recorded runs,
+// watches live training, and drives the whole train -> eval -> deploy loop
+// from a Dear ImGui panel on the right (no second terminal needed). Falls
+// back to colored shapes when the atlases are unavailable. All render tables
+// are presentation-only — collision truth is gdcore::LevelGeometry.
 //
 // Usage: viewer [level.txt] [--res <ResourcesDir>] [--camx N] [--zoom Z]
 //               [--shot out.png] [--play] [--music-offset seconds]
-//               [--watch <live.bin>] [--replay <file.gdtrace>]
+//               [--watch <live.bin>] [--replay <file.gdtrace|solution.json>]
+//               [--panel] [--tab N]
 //   --music-offset shifts song time vs sim time (positive = skip the song
 //   ahead, like the game's own ms offset setting; compensates output latency).
-//   --shot renders a few frames (Browse mode), saves a screenshot, and exits
-//   (for automated visual checks).
+//   --shot renders a few frames (Browse mode, panel hidden), saves a
+//   screenshot, and exits (for automated visual checks); --panel keeps the
+//   panel in the capture and --tab N picks its tab (0 View .. 4 Jobs).
 //   --watch starts in the training view: all live PPO envs as ghost cubes
-//   (trainer must run with --watch to publish runs/<name>/live.bin).
-//   --replay starts in the replay view: every episode in the .gdtrace
-//   re-simulated in lockstep as a ghost.
-// All flags are optional conveniences: the Training and Replay views pick
-// their files in-GUI (O opens a runs/ browser; Training auto-follows the
-// newest live.bin), H shows every keybind, F12 takes a screenshot, and
-// [ / ] nudge the music offset live.
-// Keys: TAB / 1 / 2 / 3 / 4 = mode (Browse / Play / Training / Replay)
-//       T = textured/shapes toggle, D = debug markers (triggers, unknowns)
-//       O = open file picker (Training/Replay), H = keybind help
-//       [ / ] = music offset -/+ 10 ms, F12 = screenshot
-//       F11 = borderless fullscreen (ESC does not quit; close the window)
+//   (trainer must run with --watch to publish runs/<name>/live.bin; the
+//   panel's Train tab always passes it).
+//   --replay starts in the replay view: every episode in the .gdtrace (or the
+//   single solution.json run) re-simulated in lockstep as a ghost.
+// Everything is reachable from the panel: mode buttons, level picker, view
+// toggles, replay/training file lists, training form + live status, runs
+// table (eval / deploy / check trace / resume / delete), tools and job logs.
+// Hotkeys are optional shortcuts (listed in the panel's "Keyboard shortcuts").
+// Paths: repo root is found from the exe location (build/viewer.exe); prefs
+// persist in <repo>/viewer_prefs.ini.
 
-#include "core/geometry.hpp"
-#include "core/level.hpp"
-#include "viewer/gd_frames.hpp"
+#include "viewer/gui.hpp"
+#include "viewer/input.hpp"
+#include "viewer/jobs.hpp"
+#include "viewer/levels.hpp"
 #include "viewer/modes.hpp"
 #include "viewer/modes_rl.hpp"
+#include "viewer/paths.hpp"
+#include "viewer/prefs.hpp"
 #include "viewer/world.hpp"
 
 #include "raylib.h"
+#include "rlImGui.h"
 
-#include <algorithm>
-#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <string>
 
-static const char* kDefaultLevel =
-    "S:/SteamLibrary/steamapps/common/Geometry Dash/Resources/levels/1.txt";
+namespace {
 
-int main(int argc, char** argv) {
-    std::string levelPath = kDefaultLevel;
-    std::string shotPath, resDirOverride;
-    std::string livePath, replayPath;  // empty = pick in-GUI / auto-detect
-    float camX = 0.0f, zoom = 1.5f, musicOffset = 0.0f;
-    int startMode = 0;  // 0 = Browse (default, keeps --shot automation), 1 = Play
-    for (int i = 1; i < argc; ++i) {
-        if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) shotPath = argv[++i];
-        else if (!std::strcmp(argv[i], "--camx") && i + 1 < argc) camX = std::strtof(argv[++i], nullptr);
-        else if (!std::strcmp(argv[i], "--zoom") && i + 1 < argc) zoom = std::strtof(argv[++i], nullptr);
-        else if (!std::strcmp(argv[i], "--res") && i + 1 < argc) resDirOverride = argv[++i];
-        else if (!std::strcmp(argv[i], "--play")) startMode = 1;
-        else if (!std::strcmp(argv[i], "--watch") && i + 1 < argc) { livePath = argv[++i]; startMode = 2; }
-        else if (!std::strcmp(argv[i], "--replay") && i + 1 < argc) { replayPath = argv[++i]; startMode = 3; }
-        else if (!std::strcmp(argv[i], "--music-offset") && i + 1 < argc) musicOffset = std::strtof(argv[++i], nullptr);
-        else levelPath = argv[i];
-    }
-
-    gdv::App app;
-    try {
-        app.level = gd::Level::loadFromFile(levelPath);
-    } catch (const std::exception& e) {
-        TraceLog(LOG_ERROR, "failed to load level: %s", e.what());
-        return 1;
-    }
-    for (const auto& o : app.level.objects) app.maxX = std::max(app.maxX, o.x);
-    app.geom = gdcore::LevelGeometry::build(app.level);
-
-    // Draw order: z-layer (key 24, else per-id default), then z-order (key 25);
-    // stable sort keeps file order on ties.
-    app.drawOrder.reserve(app.level.objects.size());
-    for (const auto& o : app.level.objects) app.drawOrder.push_back(&o);
-    auto zLayer = [](const gd::Object& o) {
-        const gdv::RenderSpec* s = gdv::renderSpec(o.id);
-        return gdv::propInt(o, 24, s ? s->defaultZ : 0);
-    };
-    std::stable_sort(app.drawOrder.begin(), app.drawOrder.end(),
-                     [&](const gd::Object* a, const gd::Object* b) {
-                         int za = zLayer(*a), zb = zLayer(*b);
-                         if (za != zb) return za < zb;
-                         return gdv::propInt(*a, 25, 0) < gdv::propInt(*b, 25, 0);
-                     });
-
-    app.bgTrack = gdv::buildTrack(app.level, 29,
-                                  gdv::headerColor(app.level.header, "kS29", {40, 62, 255, 255}));
-    app.groundTrack = gdv::buildTrack(app.level, 30,
-                                      gdv::headerColor(app.level.header, "kS30", {0, 19, 200, 255}));
-    app.lineColor = gdv::headerColor(app.level.header, "kS31", WHITE);
-
-    const int W = 1600, H = 900;
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
-    InitWindow(W, H, "gd-rl viewer — Stereo Madness");
-    SetTargetFPS(60);
-    InitAudioDevice();
-
-    // Resources dir: explicit --res, else derived from the level path
-    // (Resources/levels/1.txt -> Resources).
-    std::filesystem::path resDir = resDirOverride.empty()
-                                       ? std::filesystem::path(levelPath).parent_path().parent_path()
-                                       : std::filesystem::path(resDirOverride);
-    // Smaller stream buffer: less output latency and a finer
-    // GetMusicTimePlayed, both matter for the sim<->song sync.
-    SetAudioStreamBufferSizeDefault(1024);
-    // Local copy first (assets/ is gitignored — RobTop's content), GD install
-    // as fallback.
-    app.musicOffset = musicOffset;
-    const char* localSong = "assets/StereoMadness.mp3";
-    app.music = LoadMusicStream(std::filesystem::exists(localSong)
-                                    ? localSong
-                                    : (resDir / "StereoMadness.mp3").string().c_str());
-    app.musicLoaded = IsMusicValid(app.music);
-    if (app.musicLoaded) app.music.looping = false;
-    else TraceLog(LOG_WARNING, "StereoMadness.mp3 unavailable — playing silent");
-
+void loadSheets(gdv::App& app) {
+    const std::filesystem::path& resDir = app.resDir;
+    app.atlas.unloadAll();
+    app.playerFrame1 = app.playerFrame2 = app.shipFrame1 = app.shipFrame2 = nullptr;
     app.textured = app.atlas.loadSheet((resDir / "GJ_GameSheet-uhd.plist").string()) &&
                    app.atlas.loadSheet((resDir / "GJ_GameSheet02-uhd.plist").string());
     if (app.textured) {
-        // Validate the whole id->frame table up front so mapping mistakes are
-        // loud instead of silently falling back per object.
-        for (int id : {1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 15, 16, 17, 18, 19, 20, 21,
-                       22, 23, 27, 29, 30, 39, 40, 41, 54, 62, 65, 103, 142}) {
-            const gdv::RenderSpec* s = gdv::renderSpec(id);
-            if (!s) continue;
-            for (const char* name : s->layers)
-                if (name && !app.atlas.find(name))
-                    TraceLog(LOG_WARNING, "no atlas frame %s for id %d", name, id);
-        }
         // Player icon sheet (default cube). Missing sheet just means the rect
         // fallback player.
         if (app.atlas.loadSheet((resDir / "icons" / "player_01-uhd.plist").string())) {
@@ -159,12 +83,109 @@ int main(int argc, char** argv) {
         app.atlas.unloadAll();
     }
     app.useTextures = app.textured;
-
+    if (app.bgTex.id) UnloadTexture(app.bgTex);
+    if (app.groundTex.id) UnloadTexture(app.groundTex);
+    app.bgTex = Texture2D{};
+    app.groundTex = Texture2D{};
     if (app.textured) {
         app.bgTex = LoadTexture((resDir / "game_bg_01_001-uhd.png").string().c_str());
         app.groundTex = LoadTexture((resDir / "groundSquare_01_001-uhd.png").string().c_str());
         if (app.bgTex.id) SetTextureWrap(app.bgTex, TEXTURE_WRAP_REPEAT);
         if (app.groundTex.id) SetTextureWrap(app.groundTex, TEXTURE_WRAP_REPEAT);
+    }
+}
+
+void setTitle(const gdv::App& app) {
+    const gdv::LevelInfo* info = gdv::levelInfo(app.levelId);
+    std::string title = "gd-rl viewer — ";
+    title += info ? info->name : std::filesystem::path(app.levelPath).filename().string();
+    SetWindowTitle(title.c_str());
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    gdv::paths::init();
+    gdv::Prefs prefs;
+    prefs.load(gdv::paths::repoRoot() / "viewer_prefs.ini");
+    gdv::paths::setResourcesDir(prefs.get("resources_dir"));
+    gdv::paths::setPythonExe(prefs.get("python_exe"));
+
+    std::string levelPath;
+    std::string shotPath, resDirOverride;
+    std::string livePath, replayPath;  // empty = pick in-GUI / auto-detect
+    float camX = 0.0f, zoom = 1.5f;
+    float musicOffset = prefs.getFloat("music_offset", 0.0f);
+    int startMode = 0;  // 0 = Browse (default, keeps --shot automation), 1 = Play
+    bool keepPanel = false;  // --panel: keep the GUI panel in --shot captures
+    int startTab = -1;       // --tab N: select a panel tab (View/Train/Runs/Tools/Jobs)
+    for (int i = 1; i < argc; ++i) {
+        if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) shotPath = argv[++i];
+        else if (!std::strcmp(argv[i], "--camx") && i + 1 < argc) camX = std::strtof(argv[++i], nullptr);
+        else if (!std::strcmp(argv[i], "--zoom") && i + 1 < argc) zoom = std::strtof(argv[++i], nullptr);
+        else if (!std::strcmp(argv[i], "--res") && i + 1 < argc) resDirOverride = argv[++i];
+        else if (!std::strcmp(argv[i], "--play")) startMode = 1;
+        else if (!std::strcmp(argv[i], "--panel")) keepPanel = true;
+        else if (!std::strcmp(argv[i], "--tab") && i + 1 < argc) startTab = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--watch") && i + 1 < argc) { livePath = argv[++i]; startMode = 2; }
+        else if (!std::strcmp(argv[i], "--replay") && i + 1 < argc) { replayPath = argv[++i]; startMode = 3; }
+        else if (!std::strcmp(argv[i], "--music-offset") && i + 1 < argc) musicOffset = std::strtof(argv[++i], nullptr);
+        else levelPath = argv[i];
+    }
+    if (!resDirOverride.empty()) gdv::paths::setResourcesDir(resDirOverride);
+    if (levelPath.empty()) {
+        int id = prefs.getInt("level_id", 1);
+        if (!gdv::levelInfo(id)) id = 1;
+        levelPath = gdv::paths::levelPath(id).generic_string();
+    }
+
+    gdv::App app;
+    {
+        std::string err;
+        if (!gdv::loadLevel(app, levelPath, err)) {
+            TraceLog(LOG_ERROR, "failed to load level: %s", err.c_str());
+            return 1;
+        }
+    }
+    // Resources dir: explicit --res / prefs, else derived from the level path
+    // (Resources/levels/1.txt -> Resources) when that looks like a GD install.
+    app.resDir = gdv::paths::resourcesDir();
+    {
+        std::filesystem::path derived = std::filesystem::path(levelPath).parent_path().parent_path();
+        std::error_code ec;
+        if (resDirOverride.empty() && std::filesystem::exists(derived / "GJ_GameSheet-uhd.plist", ec) &&
+            !std::filesystem::exists(app.resDir / "GJ_GameSheet-uhd.plist", ec)) {
+            app.resDir = derived;
+            gdv::paths::setResourcesDir(derived);
+        }
+    }
+
+    const int W = 1600, H = 900;
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
+    InitWindow(W, H, "gd-rl viewer");
+    SetTargetFPS(60);
+    InitAudioDevice();
+    setTitle(app);
+
+    // Smaller stream buffer: less output latency and a finer
+    // GetMusicTimePlayed, both matter for the sim<->song sync.
+    SetAudioStreamBufferSizeDefault(1024);
+    app.musicOffset = musicOffset;
+    gdv::loadMusic(app);
+    loadSheets(app);
+    app.useTextures = app.textured && prefs.getBool("textures", true);
+    app.showHitboxes = prefs.getBool("hitboxes", false);
+
+    gdv::Jobs jobs;
+    gdv::Gui gui(prefs, jobs);
+    gui.init(app);
+    jobs.onExit = [&gui](const gdv::JobInfo& info) { gui.jobExited(info); };
+    if (!shotPath.empty() && !keepPanel) gui.setPanelVisible(false);
+    if (startTab >= 0) gui.selectTab(startTab);
+    // A stale viewer.exe.old from "Rebuild incl. viewer" can go now.
+    {
+        std::error_code ec;
+        std::filesystem::remove(gdv::paths::buildDir() / "viewer.exe.old", ec);
     }
 
     gdv::BrowseMode browse(camX, zoom);
@@ -176,73 +197,73 @@ int main(int argc, char** argv) {
     int cur = startMode;
     modes[cur]->enter(app);
 
-    // ESC is the picker's cancel key, not an app-quit shortcut.
+    auto switchMode = [&](int want) {
+        if (want == cur || want < 0 || want >= kModeCount) return;
+        modes[cur]->exit(app);
+        cur = want;
+        modes[cur]->enter(app);
+    };
+
+    // ESC is ImGui's cancel key, not an app-quit shortcut.
     SetExitKey(KEY_NULL);
 
-    bool helpOpen = false;
-    float offsetNote = 0.0f;  // seconds left showing the music-offset toast
     int frame = 0;
     while (!WindowShouldClose()) {
-        int want = cur;
-        if (IsKeyPressed(KEY_TAB)) want = (cur + 1) % kModeCount;
-        if (IsKeyPressed(KEY_ONE)) want = 0;
-        if (IsKeyPressed(KEY_TWO)) want = 1;
-        if (IsKeyPressed(KEY_THREE)) want = 2;
-        if (IsKeyPressed(KEY_FOUR)) want = 3;
-        if (want != cur) { modes[cur]->exit(app); cur = want; modes[cur]->enter(app); }
-        if (IsKeyPressed(KEY_T) && app.textured) app.useTextures = !app.useTextures;
-        if (IsKeyPressed(KEY_D)) app.debugMarkers = !app.debugMarkers;
-        if (IsKeyPressed(KEY_F11)) ToggleBorderlessWindowed();
-        if (IsKeyPressed(KEY_H)) helpOpen = !helpOpen;
-        if (IsKeyPressed(KEY_LEFT_BRACKET)) { app.musicOffset -= 0.010f; offsetNote = 1.5f; }
-        if (IsKeyPressed(KEY_RIGHT_BRACKET)) { app.musicOffset += 0.010f; offsetNote = 1.5f; }
-        if (IsKeyPressed(KEY_F12)) {
+        gui.beginFrame(app);
+
+        // Global hotkeys (optional shortcuts for panel buttons).
+        if (gdv::keyPressed(app, KEY_TAB)) app.commands.switchMode = (cur + 1) % kModeCount;
+        if (gdv::keyPressed(app, KEY_ONE)) app.commands.switchMode = 0;
+        if (gdv::keyPressed(app, KEY_TWO)) app.commands.switchMode = 1;
+        if (gdv::keyPressed(app, KEY_THREE)) app.commands.switchMode = 2;
+        if (gdv::keyPressed(app, KEY_FOUR)) app.commands.switchMode = 3;
+        if (gdv::keyPressed(app, KEY_T) && app.textured) app.useTextures = !app.useTextures;
+        if (gdv::keyPressed(app, KEY_D)) app.debugMarkers = !app.debugMarkers;
+        if (gdv::keyPressed(app, KEY_B)) app.showHitboxes = !app.showHitboxes;
+        if (gdv::keyPressed(app, KEY_H)) gui.setPanelVisible(!gui.panelVisible());
+        if (gdv::keyPressed(app, KEY_F11)) app.commands.fullscreen = true;
+        if (gdv::keyPressed(app, KEY_LEFT_BRACKET)) app.musicOffset -= 0.010f;
+        if (gdv::keyPressed(app, KEY_RIGHT_BRACKET)) app.musicOffset += 0.010f;
+        if (gdv::keyPressed(app, KEY_F12)) app.commands.screenshot = true;
+
+        // Panel requests.
+        gdv::Commands cmd = app.commands;
+        app.commands = gdv::Commands{};
+        if (!cmd.loadLevel.empty()) {
+            std::string err;
+            modes[cur]->exit(app);
+            if (gdv::loadLevel(app, cmd.loadLevel, err)) {
+                gdv::loadMusic(app);
+                setTitle(app);
+                for (gdv::Mode* m : modes) m->onLevelChanged(app);
+                gui.toast(std::string("loaded ") + std::filesystem::path(cmd.loadLevel).filename().string());
+            } else {
+                gui.toast("level load failed: " + err, 10);
+            }
+            modes[cur]->enter(app);
+        }
+        if (!cmd.replayTrace.empty()) { switchMode(3); replay.openTrace(cmd.replayTrace); }
+        if (!cmd.replaySolution.empty()) { switchMode(3); replay.openSolution(cmd.replaySolution); }
+        if (!cmd.watchLive.empty()) training.watch(cmd.watchLive);
+        if (cmd.switchMode >= 0) switchMode(cmd.switchMode);
+        if (cmd.fullscreen) ToggleBorderlessWindowed();
+        if (cmd.screenshot) {
             // Relative path: raylib's TakeScreenshot prepends the CWD itself.
-            TakeScreenshot(TextFormat("shot_%lld.png", (long long)time(nullptr)));
+            const char* name = TextFormat("shot_%lld.png", (long long)time(nullptr));
+            TakeScreenshot(name);
+            gui.toast(std::string("saved ") + name);
         }
 
         if (app.musicLoaded) UpdateMusicStream(app.music);
         modes[cur]->update(app);
 
         BeginDrawing();
+        BeginScissorMode(0, 0, app.viewW, app.viewH);
         modes[cur]->draw(app);
-        DrawText(TextFormat("[%s]   TAB/1-4: mode   H: help   T: textures   D: debug   F11: fullscreen",
-                            modes[cur]->name()),
-                 12, GetScreenHeight() - 24, 16, Color{170, 175, 200, 255});
-        if (offsetNote > 0.0f) {
-            offsetNote -= GetFrameTime();
-            const char* txt = TextFormat("music offset %+d ms",
-                                         (int)std::lround(app.musicOffset * 1000.0f));
-            DrawText(txt, GetScreenWidth() - MeasureText(txt, 18) - 16, 12, 18, RAYWHITE);
-        }
-        if (helpOpen) {
-            static const char* kHelp[] = {
-                "TAB / 1-4      mode: Browse / Play / Training / Replay",
-                "T              textures <-> colored shapes",
-                "D              debug markers (triggers, unknown ids)",
-                "F11            borderless fullscreen",
-                "F12            screenshot (shot_*.png in the working dir)",
-                "[ / ]          music offset -/+ 10 ms",
-                "H              toggle this help",
-                "",
-                "Browse:   drag = pan   wheel = zoom   SPACE = autoscroll   R = reset camera",
-                "Play:     SPACE / UP / click = jump (hold to buffer)   R = restart",
-                "Training: O = pick run to watch   F = follow / free camera",
-                "Replay:   O = open trace   SPACE = pause   LEFT/RIGHT = speed",
-                "          R = restart   F = follow / free camera",
-                "",
-                "Picker:   arrows / wheel = select   ENTER / click = open   ESC = cancel",
-            };
-            constexpr int kHelpLines = sizeof(kHelp) / sizeof(kHelp[0]);
-            int w = 640, h = 30 + kHelpLines * 24 + 16;
-            int x = (GetScreenWidth() - w) / 2, y = (GetScreenHeight() - h) / 2;
-            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{0, 0, 0, 140});
-            DrawRectangle(x, y, w, h, Color{24, 26, 38, 245});
-            DrawRectangleLines(x, y, w, h, Color{110, 120, 170, 255});
-            DrawText("Keybinds", x + 16, y + 12, 20, RAYWHITE);
-            for (int i = 0; i < kHelpLines; ++i)
-                DrawText(kHelp[i], x + 16, y + 42 + i * 24, 18, Color{185, 190, 210, 255});
-        }
+        EndScissorMode();
+        rlImGuiBegin();
+        gui.draw(app, modes, kModeCount, cur);
+        rlImGuiEnd();
         EndDrawing();
 
         if (!shotPath.empty() && ++frame >= 5) {
@@ -250,6 +271,9 @@ int main(int argc, char** argv) {
             break;
         }
     }
+    modes[cur]->exit(app);
+    if (shotPath.empty()) gui.savePrefs(app);  // --shot is automation: never persist
+    gui.shutdown();
     if (app.bgTex.id) UnloadTexture(app.bgTex);
     if (app.groundTex.id) UnloadTexture(app.groundTex);
     if (app.musicLoaded) UnloadMusicStream(app.music);

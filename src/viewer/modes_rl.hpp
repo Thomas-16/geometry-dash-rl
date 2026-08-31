@@ -1,51 +1,18 @@
-// RL visualization modes: ReplayMode re-simulates .gdtrace episodes (per-tick
-// hold bits; exact by determinism) as tinted ghosts, TrainingViewMode renders
-// a live snapshot of every training env from the trainer's live.bin.
-// Both open their files through an in-viewer Picker (O key) that scans runs/,
-// so no command-line flag is required to reach them.
+// RL visualization modes: ReplayMode re-simulates recorded hold sequences
+// (.gdtrace episodes or a solution.json) as tinted ghosts — exact by
+// determinism — and TrainingViewMode renders a live snapshot of every
+// training env from the trainer's live.bin. Files are chosen from the GUI
+// panel (drawPanel) or pushed in via App::commands.
 #pragma once
 
 #include "viewer/modes.hpp"
+#include "viewer/runs.hpp"
 
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace gdv {
-
-struct PickEntry {
-    std::string label;  // shown in the list
-    std::string path;   // returned on select
-};
-
-// Modal list overlay: arrows/wheel move, Enter/click selects, Esc closes.
-// update() handles input and returns the selected path (empty = none yet);
-// draw() renders. While open, the owning mode should swallow its own keys.
-class Picker {
-public:
-    void open(std::string title, std::vector<PickEntry> entries);
-    void close() { open_ = false; }
-    bool isOpen() const { return open_; }
-    std::string update();
-    void draw() const;
-
-private:
-    // Shared by update (hit test) and draw.
-    Rectangle panel() const;
-    int visibleRows() const;
-
-    bool open_ = false;
-    std::string title_;
-    std::vector<PickEntry> entries_;
-    int sel_ = 0;
-    int scroll_ = 0;
-};
-
-// runs/ scans, newest first. Replay files: */wins.gdtrace, */eval.gdtrace,
-// */traces/*.gdtrace. Live files: */live.bin.
-std::vector<PickEntry> scanReplayFiles();
-std::vector<PickEntry> scanLiveFiles();
-std::string newestLiveFile();  // "" when none exist
 
 class ReplayMode : public Mode {
 public:
@@ -54,6 +21,11 @@ public:
     void enter(App&) override;
     void update(App&) override;
     void draw(const App&) override;
+    void drawPanel(App&) override;
+    void onLevelChanged(App&) override;
+
+    void openTrace(const std::string& path);     // .gdtrace
+    void openSolution(const std::string& path);  // solution.json
 
 private:
     struct Ghost {
@@ -63,23 +35,33 @@ private:
         gdcore::PlayerState s;
         int tick = 0;
         int deathAge = -1;  // ticks since death; -1 = alive
+        bool hidden = false;
         Color tint{};
+        std::vector<Vector2> presses;  // world positions of hold rising edges
     };
-    void loadFile();
     void restart();
+    void stepOne(const App& app);         // all ghosts, one tick
+    void stepTo(const App& app, int t);   // deterministic fast-forward (restarts if t < tick_)
+    void rescan();
 
     std::string path_;
     std::string error_;
     gdcore::PhysicsConfig cfg_ = gdcore::stereoMadnessCube();
     std::vector<Ghost> ghosts_;
-    Picker picker_;
+    int maxTicks_ = 0;
     double accum_ = 0.0;
     long long tick_ = 0;
     int speedIdx_ = 1;  // index into kSpeeds
     bool paused_ = false;
-    bool follow_ = true;  // F: follow leader vs free drag/zoom camera
+    bool follow_ = true;  // follow leader vs free drag/zoom camera
+    bool markers_ = true;
     float camY_ = 0.0f;
     Camera2D cam_{};
+    // panel state
+    std::vector<FileEntry> traces_, solutions_;
+    double lastScan_ = -1.0;
+    int selTrace_ = -1, selSolution_ = -1;
+    int scrub_ = 0;
 };
 
 class TrainingViewMode : public Mode {
@@ -90,6 +72,9 @@ public:
     void enter(App&) override;
     void update(App&) override;
     void draw(const App&) override;
+    void drawPanel(App&) override;
+
+    void watch(const std::string& livePath);
 
 private:
     struct Snapshot {
@@ -97,19 +82,23 @@ private:
         float bestX = 0.0f;
         float sps = 0.0f;
         uint32_t episodes = 0;
+        uint32_t seq = 0;
         // per env: x, y, yvel + ship/dead flags
         std::vector<float> xyv;      // n*3
         std::vector<uint8_t> ship, dead;
         bool valid = false;
     };
     bool poll();
+    void rescan();
 
     std::string path_;
     Snapshot snap_;
-    Picker picker_;
-    bool follow_ = true;  // F: follow leader vs free drag/zoom camera
+    bool follow_ = true;
     float camY_ = 0.0f;
     Camera2D cam_{};
+    double lastSeqChange_ = 0.0;
+    std::vector<FileEntry> lives_;
+    double lastScan_ = -1.0;
 };
 
 }  // namespace gdv

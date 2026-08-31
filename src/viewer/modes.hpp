@@ -1,9 +1,14 @@
 // Viewer modes: Browse (free camera / level inspection) and Play (human plays
-// the cube with the bit-exact gdcore physics). A future TrainingView mode is
-// one more Mode subclass feeding many PlayerStates into drawWorld's actor hook.
+// the cube with the bit-exact gdcore physics). RL modes live in modes_rl.hpp.
+// Every mode draws its own controls into the GUI panel's View tab via
+// drawPanel() (ImGui, immediate mode), so the panel never touches mode state.
 #pragma once
 
 #include "viewer/world.hpp"
+
+#include <cstdint>
+#include <string>
+#include <vector>
 
 namespace gdv {
 
@@ -15,6 +20,8 @@ public:
     virtual void exit(App&) {}          // called on switch-away
     virtual void update(App&) = 0;      // input + sim, once per render frame
     virtual void draw(const App&) = 0;  // inside Begin/EndDrawing
+    virtual void drawPanel(App&) {}     // ImGui widgets, inside the panel's View tab
+    virtual void onLevelChanged(App&) {}  // app.level/geom were replaced
 };
 
 class BrowseMode : public Mode {
@@ -24,10 +31,12 @@ public:
     void enter(App&) override;
     void update(App&) override;
     void draw(const App&) override;
+    void drawPanel(App&) override;
 
 private:
     Camera2D cam_{};
     bool autoScroll_ = false;
+    float gotoX_ = 0.0f;
 };
 
 class PlayMode : public Mode {
@@ -37,9 +46,14 @@ public:
     void exit(App&) override;
     void update(App&) override;
     void draw(const App&) override;
+    void drawPanel(App&) override;
+    void onLevelChanged(App&) override;
 
 private:
     void resetAttempt(App&);
+    void stepTick(App& app, bool hold);  // one 1/240 s physics tick
+    void setPaused(App& app, bool paused);
+    void saveSolution(App& app);
 
     gdcore::PhysicsConfig cfg_ = gdcore::stereoMadnessCube();
     gdcore::PlayerState player_{};
@@ -50,8 +64,12 @@ private:
     float deathTimer_ = 0.0f;  // >0: death pause counting down (wall time)
     float camY_ = 0.0f;        // engine y of the screen bottom (band follow)
     bool won_ = false;
+    bool paused_ = false;
+    bool stepOnce_ = false;
     float cubeRot_ = 0.0f;     // cosmetic-only spin, never physics
     float shipRot_ = 0.0f;     // cosmetic ship tilt (updateShipRotation-style)
+    std::vector<uint8_t> holds_;  // per-tick input of the current attempt
+    std::string status_;          // last save result shown in the panel
 };
 
 }  // namespace gdv

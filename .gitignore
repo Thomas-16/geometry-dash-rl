@@ -6,3 +6,5 @@ assets/
 __pycache__/
 runs/
 .venv/
+viewer_prefs.ini
+build/viewer.exe.old

@@ -17,6 +17,16 @@ cmake -S . -B build -G Ninja && cmake --build build
 - **Do not remove `-static` from CMakeLists.txt.** This machine's MinGW ld (binutils 2.43.1) crashes with a silent "ld returned 116 exit status" when linking C++ exception code against shared runtimes. If a new target fails with exit 116, static linking is the fix.
 - raylib and zlib come from MSYS2 packages, not FetchContent.
 
+## Viewer GUI (src/viewer)
+
+- raylib window + a Dear ImGui panel on the right (rlImGui backend). **Deps are FetchContent'd at configure time** (`build/_deps`): ImGui `v1.92.7`, rlImGui tag `Raylib_5_5` (its `main` targets raylib 6.0 — do not bump one without the other; the 5.5 tag needs ImGui >= 1.92), nlohmann/json 3.11.3. First configure needs network; `-DVIEWER_VENDORED_DEPS=<dir>` with `imgui/`, `rlImGui/`, `json/` checkouts builds offline.
+- Layout: the game viewport is `App::viewW x viewH` anchored at (0,0); every camera/background site uses `viewW(app)/viewH(app)`, never `GetScreenWidth()`. Mode input goes through `viewer/input.hpp` wrappers (gated on ImGui capture) — never raw `IsKeyPressed` in a mode. Modes draw their own controls in `Mode::drawPanel`; cross-tab requests go through `App::commands` (consumed in `main.cpp`).
+- The panel launches `python -u -m gdrl.*` (cwd `python/`, absolute paths) and the tool exes via `viewer/jobs.cpp` (Win32 pipe + Job Object, children die with the viewer). `jobs.cpp`/`paths.cpp` include windows.h and must never include raylib.h.
+- **Train-tab defaults mirror `PPOConfig`/`train.py`** (`Gui::TrainForm` in `gui.hpp`); change them in both places. Only non-default flags are emitted.
+- **Graceful stop**: the GUI writes `runs/<name>/STOP`; `train.py` checks it once per update, saves `ckpt_latest.pt`, prints `stopped: ...` and exits 0 (also on Ctrl-C). Stale STOP files are unlinked at startup.
+- Pipeline: a `| det ... WIN` line auto-launches `gdrl.eval` on `ckpt_best_det.pt` (once, plus a final eval at exit); Deploy is always a confirmed click.
+- Prefs persist in `<repo>/viewer_prefs.ini` (gitignored); repo root is found from the exe path. Automated captures: `viewer --shot out.png [--panel] [--tab N]` (0 View .. 4 Jobs; `--shot` never persists prefs). "Rebuild incl. viewer" renames the running `viewer.exe` to `.old` first (deleted on next start).
+
 ## Level data
 
 - GD install: `S:\SteamLibrary\steamapps\common\Geometry Dash\`
@@ -36,7 +46,7 @@ cmake -S . -B build -G Ninja && cmake --build build
 - **Speed portals later change an input, not the network**: per-tick `dx` is already an obs scalar and a `buildObs` parameter.
 - **Env stepping is parallel and bit-deterministic**: `$GDENV_THREADS` total threads (1 = exact serial fallback), default `hardware_concurrency()-1`. After touching the env layer, run `./build/env_check det` AND `python -m gdrl.selftest` (from `python/`; serial-vs-threaded byte-identity).
 - **Regression bar for RL changes**: a default `python -m gdrl.train` run must still beat Stereo Madness (deterministic `det ... WIN` line / `wins.gdtrace`), and `python -m gdrl.eval runs/<name>/ckpt_best_det.pt` must write a `solution.json`. Don't shrink `--updates` for the check — it compresses the lr/entropy anneal and changes the learning trajectory.
-- Hyperparameter defaults live in `PPOConfig` (`python/gdrl/ppo.py`); the train.py CLI mirrors them — never introduce a second default.
+- Hyperparameter defaults live in `PPOConfig` (`python/gdrl/ppo.py`); the train.py CLI mirrors them — never introduce a second default (the viewer's Train tab is a third mirror, `Gui::TrainForm`; keep it in sync).
 - **Performance contract**: trunks run under bf16 autocast with channels_last conv tensors (`--amp bf16`, default; `--amp none` = fp32); heads, logit bound and losses stay fp32 — keep it that way (bf16 logits inject noise into PPO ratios). The Bernoulli math is closed-form (`model.py`), not `torch.distributions`. `--compile` is opt-in and needs Triton (`pip install triton-windows`). Det eval runs off-thread (`DetEvaluator`); SIL replay is one DLL call (`gdenv_replay`). Before/after any perf change run `python -m gdrl.bench --compare <baseline.json>` (from `python/`) and check the per-phase `t_rollout/t_update/t_sil/t_det_wait/t_ckpt` columns in `log.csv`.
 
 ## Geode mods (mod/ = trace logger, mod_replay/ = open-loop replayer)

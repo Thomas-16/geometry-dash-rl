@@ -52,16 +52,64 @@ target_link_libraries(dump PRIVATE gdcore)
 add_executable(trace_check tools/trace_check.cpp)
 target_link_libraries(trace_check PRIVATE gdcore)
 
+# Viewer GUI deps (Dear ImGui + rlImGui backend + nlohmann/json), fetched at
+# configure time into build/_deps. Pins: rlImGui tag Raylib_5_5 (main targets
+# raylib 6.0 and calls GetDisplayScale, absent in 5.5) which needs ImGui >= 1.92
+# (dynamic-texture backend API). Neither ships usable CMake; their sources are
+# compiled straight into the viewer. Set VIEWER_VENDORED_DEPS=<dir> holding
+# imgui/, rlImGui/, json/ checkouts to build offline.
+include(FetchContent)
+set(VIEWER_VENDORED_DEPS "" CACHE PATH "offline checkout dir for imgui/rlImGui/json")
+if(VIEWER_VENDORED_DEPS)
+  set(imgui_SOURCE_DIR ${VIEWER_VENDORED_DEPS}/imgui)
+  set(rlimgui_SOURCE_DIR ${VIEWER_VENDORED_DEPS}/rlImGui)
+  set(json_SOURCE_DIR ${VIEWER_VENDORED_DEPS}/json)
+else()
+  FetchContent_Declare(imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG dac07199cfd761113d966eb8ad739254e10df2fe  # v1.92.7
+    GIT_SHALLOW OFF)
+  FetchContent_Declare(rlimgui
+    GIT_REPOSITORY https://github.com/raylib-extras/rlImGui.git
+    GIT_TAG 118221c8a532501a3c2c236b62950877cbefc2b4  # tag Raylib_5_5
+    GIT_SHALLOW OFF)
+  FetchContent_Declare(json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+    GIT_SHALLOW ON)
+  set(JSON_BuildTests OFF CACHE INTERNAL "")
+  FetchContent_MakeAvailable(imgui rlimgui json)
+endif()
+
+set(VIEWER_THIRD_PARTY
+  ${imgui_SOURCE_DIR}/imgui.cpp
+  ${imgui_SOURCE_DIR}/imgui_draw.cpp
+  ${imgui_SOURCE_DIR}/imgui_tables.cpp
+  ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+  ${rlimgui_SOURCE_DIR}/rlImGui.cpp
+)
+set_source_files_properties(${VIEWER_THIRD_PARTY} PROPERTIES COMPILE_OPTIONS "-w")
+
 add_executable(viewer
   src/viewer/main.cpp
   src/viewer/atlas.cpp
   src/viewer/world.cpp
   src/viewer/modes.cpp
   src/viewer/modes_rl.cpp
+  src/viewer/gui.cpp
+  src/viewer/jobs.cpp
+  src/viewer/paths.cpp
+  src/viewer/prefs.cpp
+  src/viewer/runs.cpp
+  ${VIEWER_THIRD_PARTY}
 )
+target_include_directories(viewer PRIVATE
+  ${imgui_SOURCE_DIR} ${rlimgui_SOURCE_DIR} ${json_SOURCE_DIR}/include)
+target_compile_definitions(viewer PRIVATE NO_FONT_AWESOME IMGUI_DISABLE_DEMO_WINDOWS
+  IMGUI_DISABLE_WIN32_DEFAULT_IME_FUNCTIONS)
 target_link_libraries(viewer PRIVATE gdcore)
 if(MINGW)
-  target_link_libraries(viewer PRIVATE raylib opengl32 gdi32 winmm)
+  target_link_libraries(viewer PRIVATE raylib opengl32 gdi32 winmm shell32 ole32)
 else()
   find_package(raylib REQUIRED)
   target_link_libraries(viewer PRIVATE raylib)

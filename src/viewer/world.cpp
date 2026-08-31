@@ -1,11 +1,13 @@
 #include "viewer/world.hpp"
 
 #include "viewer/gd_frames.hpp"
+#include "viewer/levels.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 
 namespace gdv {
 
@@ -254,7 +256,7 @@ void drawBackground(const App& app, float camX) {
     // Background: screen space so it fills the window at any zoom, with a
     // 0.5x parallax scroll like the game.
     if (app.useTextures && app.bgTex.id) {
-        float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight();
+        float sw = (float)viewW(app), sh = (float)viewH(app);
         float srcH = (float)app.bgTex.height;
         float srcW = sw * srcH / sh;
         float srcX = camX * 0.5f * (srcH / sh);
@@ -269,7 +271,7 @@ void drawWorld(const App& app, const Camera2D& cam, float colorX,
     {
         // visible world x-range for grid lines
         Vector2 tl = GetScreenToWorld2D({0, 0}, cam);
-        Vector2 br = GetScreenToWorld2D({(float)GetScreenWidth(), (float)GetScreenHeight()}, cam);
+        Vector2 br = GetScreenToWorld2D({(float)viewW(app), (float)viewH(app)}, cam);
         // grid (30-unit spacing), faint
         for (float gx = std::floor(tl.x / 30) * 30; gx <= br.x; gx += 30)
             DrawLineEx({gx, tl.y}, {gx, br.y}, 1.0f / cam.zoom, Color{255, 255, 255, 10});
@@ -287,6 +289,7 @@ void drawWorld(const App& app, const Camera2D& cam, float colorX,
             }
         }
 
+        if (app.showHitboxes) drawHitboxes(app, cam);
         if (drawActors) drawActors();
 
         // Ground after objects (and actors): the game's ground layer sits at
@@ -337,6 +340,99 @@ void drawWorld(const App& app, const Camera2D& cam, float colorX,
         }
     }
     EndMode2D();
+}
+
+void drawHitboxes(const App& app, const Camera2D& cam) {
+    // Engine boxes -> world: x unchanged, world y = -(engine y - 90).
+    float lw = 1.5f / cam.zoom;
+    auto rect = [](const gdcore::Box& b) {
+        return Rectangle{b.left, -(b.top - 90.0f), b.right - b.left, b.top - b.bottom};
+    };
+    for (const auto& b : app.geom.solids) {
+        Rectangle r = rect(b);
+        DrawRectangleRec(r, Color{80, 200, 255, 28});
+        DrawRectangleLinesEx(r, lw, Color{80, 200, 255, 230});
+    }
+    for (const auto& b : app.geom.hazards) {
+        Rectangle r = rect(b);
+        DrawRectangleRec(r, Color{255, 70, 70, 40});
+        DrawRectangleLinesEx(r, lw, Color{255, 70, 70, 240});
+    }
+    for (const auto& p : app.geom.portals) {
+        Rectangle r = rect(p.box);
+        Color c = p.toShip ? Color{240, 120, 220, 255} : Color{110, 240, 110, 255};
+        DrawRectangleLinesEx(r, lw, c);
+    }
+    // Win line: physics ends at last object + 40 (PlayMode / env_check / gdenv).
+    float wx = app.maxX + 40.0f;
+    DrawLineEx({wx, -400.0f}, {wx, 90.0f}, 2.0f / cam.zoom, Color{255, 230, 80, 220});
+}
+
+bool loadLevel(App& app, const std::string& path, std::string& err) {
+    gd::Level lvl;
+    try {
+        lvl = gd::Level::loadFromFile(path);
+    } catch (const std::exception& e) {
+        err = e.what();
+        return false;
+    }
+    app.level = std::move(lvl);
+    app.levelPath = path;
+    // id from the file stem (Resources/levels/<id>.txt); anything else = -1
+    {
+        std::string stem = std::filesystem::path(path).stem().string();
+        bool numeric = !stem.empty();
+        for (char c : stem) numeric = numeric && c >= '0' && c <= '9';
+        app.levelId = numeric ? std::atoi(stem.c_str()) : -1;
+    }
+    app.maxX = 0.0f;
+    for (const auto& o : app.level.objects) app.maxX = std::max(app.maxX, o.x);
+    app.geom = gdcore::LevelGeometry::build(app.level);
+
+    // Draw order: z-layer (key 24, else per-id default), then z-order (key 25);
+    // stable sort keeps file order on ties.
+    app.drawOrder.clear();
+    app.drawOrder.reserve(app.level.objects.size());
+    for (const auto& o : app.level.objects) app.drawOrder.push_back(&o);
+    auto zLayer = [](const gd::Object& o) {
+        const RenderSpec* s = renderSpec(o.id);
+        return propInt(o, 24, s ? s->defaultZ : 0);
+    };
+    std::stable_sort(app.drawOrder.begin(), app.drawOrder.end(),
+                     [&](const gd::Object* a, const gd::Object* b) {
+                         int za = zLayer(*a), zb = zLayer(*b);
+                         if (za != zb) return za < zb;
+                         return propInt(*a, 25, 0) < propInt(*b, 25, 0);
+                     });
+
+    app.bgTrack = buildTrack(app.level, 29,
+                             headerColor(app.level.header, "kS29", {40, 62, 255, 255}));
+    app.groundTrack = buildTrack(app.level, 30,
+                                 headerColor(app.level.header, "kS30", {0, 19, 200, 255}));
+    app.lineColor = headerColor(app.level.header, "kS31", WHITE);
+    return true;
+}
+
+void loadMusic(App& app) {
+    if (app.musicLoaded) {
+        StopMusicStream(app.music);
+        UnloadMusicStream(app.music);
+        app.musicLoaded = false;
+        app.music = Music{};
+    }
+    const LevelInfo* info = levelInfo(app.levelId);
+    if (!info) return;
+    std::string song = std::string(info->song) + ".mp3";
+    std::filesystem::path local = std::filesystem::path("assets") / song;
+    std::filesystem::path p = std::filesystem::exists(local) ? local : app.resDir / song;
+    if (!std::filesystem::exists(p)) {
+        TraceLog(LOG_WARNING, "%s unavailable — playing silent", song.c_str());
+        return;
+    }
+    app.music = LoadMusicStream(p.string().c_str());
+    app.musicLoaded = IsMusicValid(app.music);
+    if (app.musicLoaded) app.music.looping = false;
+    else TraceLog(LOG_WARNING, "%s failed to load — playing silent", song.c_str());
 }
 
 void drawFrameAt(const Atlas& atlas, const AtlasFrame& f, Vector2 worldCenter,
@@ -405,6 +501,14 @@ void drawPlayer(const App& app, const gdcore::PlayerState& s, float rotationDeg,
         Vector2 p[4] = {corner(-15, -15), corner(15, -15), corner(15, 15), corner(-15, 15)};
         for (int i = 0; i < 4; ++i)
             DrawLineEx(p[i], p[(i + 1) % 4], 2.0f, fade(Color{10, 60, 30, 255}));
+    }
+    if (app.showHitboxes) {
+        // Axis-aligned physics boxes (rotation is cosmetic): 30x30 solid,
+        // 9x9 inner death box (physics.hpp half=15 / inner=4.5).
+        DrawRectangleLinesEx({c.x - 15.0f, c.y - 15.0f, 30.0f, 30.0f}, 1.0f,
+                             fade(Color{255, 255, 255, 230}));
+        DrawRectangleLinesEx({c.x - 4.5f, c.y - 4.5f, 9.0f, 9.0f}, 1.0f,
+                             fade(Color{255, 80, 80, 230}));
     }
 }
 

@@ -264,6 +264,11 @@ def main():
     log_path = run_dir / "log.csv"
     if not args.resume or not log_path.exists():
         log_path.write_text(LOG_COLUMNS)
+    # Graceful stop for the viewer GUI: it drops runs/<name>/STOP and this
+    # loop saves ckpt_latest and exits at the end of the current update. A
+    # stale file from a previous run must not kill this one.
+    stop_path = run_dir / "STOP"
+    stop_path.unlink(missing_ok=True)
     try:
         from torch.utils.tensorboard import SummaryWriter
         tb = SummaryWriter(str(run_dir / "tb"))
@@ -484,308 +489,325 @@ def main():
                     "sil": sil_buf.state_dict(),
                     "config": vars(args)}, path)
 
-    for update in range(start_update, args.updates):
-        t_upd0 = time.perf_counter()
-        window_final_x = []
-        window_wins = 0
-        window_ep_ticks = []
-        window_reach = 0.0  # max final_x over ALL episodes (respawned too)
-        # Rollout sub-phases: gpu = H2D + act + D2H sync, env = DLL step,
-        # misc = Python bookkeeping (recorder, bank, respawn).
-        t_roll_gpu = t_roll_env = t_roll_misc = 0.0
-        t_step0 = time.perf_counter()
-        buf.reset()
-        for step_i in range(cfg.rollout_steps):
-            # The env's obs buffer (pinned) is the source of truth: H2D into
-            # the graph's static input, act, then keep a copy in the rollout
-            # slot (device->device, async and cheap).
-            gact.obs.copy_(env.obs_tensor, non_blocking=True)
-            alv = gact()
-            buf.obs[step_i].copy_(gact.obs, non_blocking=True)
-            alv_host.copy_(alv)  # one D2H sync: action, logprob, value
-            alv_np = alv_host.numpy()
-            actions_np = alv_np[0].astype(np.uint8)
-            t_step1 = time.perf_counter()
-            next_obs, rew, term, trunc, info = env.step(actions_np)
-            t_step2 = time.perf_counter()
-            done = (term | trunc).astype(bool)
+    stopped = False
+    update = start_update
+    progress = 0.0
+    mean_x = 0.0
+    try:
+        for update in range(start_update, args.updates):
+            t_upd0 = time.perf_counter()
+            window_final_x = []
+            window_wins = 0
+            window_ep_ticks = []
+            window_reach = 0.0  # max final_x over ALL episodes (respawned too)
+            # Rollout sub-phases: gpu = H2D + act + D2H sync, env = DLL step,
+            # misc = Python bookkeeping (recorder, bank, respawn).
+            t_roll_gpu = t_roll_env = t_roll_misc = 0.0
+            t_step0 = time.perf_counter()
+            buf.reset()
+            for step_i in range(cfg.rollout_steps):
+                # The env's obs buffer (pinned) is the source of truth: H2D into
+                # the graph's static input, act, then keep a copy in the rollout
+                # slot (device->device, async and cheap).
+                gact.obs.copy_(env.obs_tensor, non_blocking=True)
+                alv = gact()
+                buf.obs[step_i].copy_(gact.obs, non_blocking=True)
+                alv_host.copy_(alv)  # one D2H sync: action, logprob, value
+                alv_np = alv_host.numpy()
+                actions_np = alv_np[0].astype(np.uint8)
+                t_step1 = time.perf_counter()
+                next_obs, rew, term, trunc, info = env.step(actions_np)
+                t_step2 = time.perf_counter()
+                done = (term | trunc).astype(bool)
 
-            rewards = rew * args.reward_scale
-            discounts = (args.gamma ** info["ticks"]).astype(np.float32)
-            if trunc.any():
-                mask = trunc.astype(bool)
-                fo = torch.as_tensor(info["final_obs"][mask], device=device)
-                with torch.no_grad(), autocast_ctx(device, cfg.amp):
-                    v_final = model(fo)[1].float().cpu().numpy()
-                rewards = rewards.copy()
-                rewards[mask] += discounts[mask] * v_final
-            buf.add(alv_np, rewards, discounts, done.astype(np.float32))
+                rewards = rew * args.reward_scale
+                discounts = (args.gamma ** info["ticks"]).astype(np.float32)
+                if trunc.any():
+                    mask = trunc.astype(bool)
+                    fo = torch.as_tensor(info["final_obs"][mask], device=device)
+                    with torch.no_grad(), autocast_ctx(device, cfg.amp):
+                        v_final = model(fo)[1].float().cpu().numpy()
+                    rewards = rewards.copy()
+                    rewards[mask] += discounts[mask] * v_final
+                buf.add(alv_np, rewards, discounts, done.astype(np.float32))
 
-            # Progress stats and replayable traces only from x=0 episodes.
-            done_fs = done & from_start
-            n_before = len(recorder.completed)
-            recorder.record(done_fs, info)
-            for ep in recorder.completed[n_before:]:
-                sil_buf.add(ep.holds, ep.final_x, ep.won)
-            if done_fs.any():
-                fx = info["final_x"][done_fs]
-                window_final_x.extend(fx.tolist())
-                window_wins += int(info["won"][done_fs].sum())
-                window_ep_ticks.extend(
-                    info["episode_ticks"][done_fs].tolist())
-                best_x = max(best_x, float(fx.max()))
-            if done.any():
-                window_reach = max(window_reach,
-                                   float(info["final_x"][done].max()))
-            total_episodes += int(done.sum())
+                # Progress stats and replayable traces only from x=0 episodes.
+                done_fs = done & from_start
+                n_before = len(recorder.completed)
+                recorder.record(done_fs, info)
+                for ep in recorder.completed[n_before:]:
+                    sil_buf.add(ep.holds, ep.final_x, ep.won)
+                if done_fs.any():
+                    fx = info["final_x"][done_fs]
+                    window_final_x.extend(fx.tolist())
+                    window_wins += int(info["won"][done_fs].sum())
+                    window_ep_ticks.extend(
+                        info["episode_ticks"][done_fs].tolist())
+                    best_x = max(best_x, float(fx.max()))
+                if done.any():
+                    window_reach = max(window_reach,
+                                       float(info["final_x"][done].max()))
+                total_episodes += int(done.sum())
 
-            # Bank a few live snapshots; respawn dead envs from the bank.
-            # Sample count scales with n_envs so shorter rollouts (fewer
-            # sampling steps per update) still refresh the bank at the same
-            # rate per env-step.
-            if step_i % 4 == 0:
-                rs = env.get_render_states()
-                for i in rng.choice(env.n_envs, max(4, env.n_envs // 64),
-                                    replace=False):
-                    x = float(rs[i, 0])
-                    if x > 400.0 and not done[i] and rs[i, 4] == 0.0:
-                        bank_add(x, env.get_state(int(i)))
-            done_idx = np.nonzero(done)[0]
-            if len(done_idx):
-                # Per-step (not per-death) respawn candidate sets.
-                learnable = [
-                    b for b in bank
-                    if respawn_attempts.get(b, 0.0) >= 8.0
-                    and 0.1 <= (respawn_passes.get(b, 0.0)
-                                / respawn_attempts[b]) <= 0.8]
-                buckets = sorted(bank)
-                won_i = info["won"]
-                final_x_i = info["final_x"]
-            for i in done_idx:
-                if respawn_x[i] >= 0.0:  # a respawned episode just ended
-                    b = int(respawn_x[i] // kBucket)
-                    respawn_attempts[b] = respawn_attempts.get(b, 0.0) + 1.0
-                    if (won_i[i]
-                            or final_x_i[i] >= respawn_x[i] + kBucket):
-                        respawn_passes[b] = respawn_passes.get(b, 0.0) + 1.0
-                if not won_i[i]:
-                    recent_deaths.append(float(final_x_i[i]))
-                    window_deaths.append(float(final_x_i[i]))
-                if bank and rng.random() < respawn_prob:
-                    picked = None
-                    u = rng.random()
-                    if u < 0.5 and learnable:
-                        # Learnable zone: spawn buckets the policy passes
-                        # sometimes but not reliably — where practice moves
-                        # the needle fastest.
-                        b = learnable[int(rng.integers(len(learnable)))]
-                        blobs = bank[b]
-                        picked = blobs[int(rng.integers(len(blobs)))]
-                    if picked is None and u < 0.75 and recent_deaths:
-                        # Wall practice: start a few hundred units before a
-                        # recently observed death — finds brand-new walls
-                        # before pass-rate stats exist for them.
-                        dx = recent_deaths[int(rng.integers(
-                            len(recent_deaths)))]
-                        picked = bank_pick(dx - 450.0, dx - 50.0)
-                    if picked is None:
-                        # Uniform over the bank: retention practice.
-                        blobs = bank[buckets[int(rng.integers(len(buckets)))]]
-                        picked = blobs[int(rng.integers(len(blobs)))]
-                    env.set_state(int(i), picked[1])
-                    from_start[i] = False
-                    respawn_x[i] = picked[0]
-                else:
-                    from_start[i] = True
-                    respawn_x[i] = -1.0
+                # Bank a few live snapshots; respawn dead envs from the bank.
+                # Sample count scales with n_envs so shorter rollouts (fewer
+                # sampling steps per update) still refresh the bank at the same
+                # rate per env-step.
+                if step_i % 4 == 0:
+                    rs = env.get_render_states()
+                    for i in rng.choice(env.n_envs, max(4, env.n_envs // 64),
+                                        replace=False):
+                        x = float(rs[i, 0])
+                        if x > 400.0 and not done[i] and rs[i, 4] == 0.0:
+                            bank_add(x, env.get_state(int(i)))
+                done_idx = np.nonzero(done)[0]
+                if len(done_idx):
+                    # Per-step (not per-death) respawn candidate sets.
+                    learnable = [
+                        b for b in bank
+                        if respawn_attempts.get(b, 0.0) >= 8.0
+                        and 0.1 <= (respawn_passes.get(b, 0.0)
+                                    / respawn_attempts[b]) <= 0.8]
+                    buckets = sorted(bank)
+                    won_i = info["won"]
+                    final_x_i = info["final_x"]
+                for i in done_idx:
+                    if respawn_x[i] >= 0.0:  # a respawned episode just ended
+                        b = int(respawn_x[i] // kBucket)
+                        respawn_attempts[b] = respawn_attempts.get(b, 0.0) + 1.0
+                        if (won_i[i]
+                                or final_x_i[i] >= respawn_x[i] + kBucket):
+                            respawn_passes[b] = respawn_passes.get(b, 0.0) + 1.0
+                    if not won_i[i]:
+                        recent_deaths.append(float(final_x_i[i]))
+                        window_deaths.append(float(final_x_i[i]))
+                    if bank and rng.random() < respawn_prob:
+                        picked = None
+                        u = rng.random()
+                        if u < 0.5 and learnable:
+                            # Learnable zone: spawn buckets the policy passes
+                            # sometimes but not reliably — where practice moves
+                            # the needle fastest.
+                            b = learnable[int(rng.integers(len(learnable)))]
+                            blobs = bank[b]
+                            picked = blobs[int(rng.integers(len(blobs)))]
+                        if picked is None and u < 0.75 and recent_deaths:
+                            # Wall practice: start a few hundred units before a
+                            # recently observed death — finds brand-new walls
+                            # before pass-rate stats exist for them.
+                            dx = recent_deaths[int(rng.integers(
+                                len(recent_deaths)))]
+                            picked = bank_pick(dx - 450.0, dx - 50.0)
+                        if picked is None:
+                            # Uniform over the bank: retention practice.
+                            blobs = bank[buckets[int(rng.integers(len(buckets)))]]
+                            picked = blobs[int(rng.integers(len(blobs)))]
+                        env.set_state(int(i), picked[1])
+                        from_start[i] = False
+                        respawn_x[i] = picked[0]
+                    else:
+                        from_start[i] = True
+                        respawn_x[i] = -1.0
 
-            step_ticks = int(info["ticks"].sum())
-            global_ticks += step_ticks
-            ticks_window += step_ticks
+                step_ticks = int(info["ticks"].sum())
+                global_ticks += step_ticks
+                ticks_window += step_ticks
 
-            if live and time.time() - last_live > 1.0 / 60.0:
-                sps = ticks_window / max(time.time() - t_start, 1e-9)
-                live.write(env.get_render_states(), global_ticks, best_x, sps,
-                           total_episodes)
-                last_live = time.time()
-            t_step3 = time.perf_counter()
-            t_roll_gpu += t_step1 - t_step0
-            t_roll_env += t_step2 - t_step1
-            t_roll_misc += t_step3 - t_step2
-            t_step0 = t_step3
+                if live and time.time() - last_live > 1.0 / 60.0:
+                    sps = ticks_window / max(time.time() - t_start, 1e-9)
+                    live.write(env.get_render_states(), global_ticks, best_x, sps,
+                               total_episodes)
+                    last_live = time.time()
+                t_step3 = time.perf_counter()
+                t_roll_gpu += t_step1 - t_step0
+                t_roll_env += t_step2 - t_step1
+                t_roll_misc += t_step3 - t_step2
+                t_step0 = t_step3
 
-        last_obs = torch.as_tensor(env.obs_tensor, device=device)
-        sync()
-        t_roll = time.perf_counter() - t_upd0
+            last_obs = torch.as_tensor(env.obs_tensor, device=device)
+            sync()
+            t_roll = time.perf_counter() - t_upd0
 
-        # Anneal position continues across resumes (progress0 from the ckpt).
-        progress = progress0 + (1.0 - progress0) * (
-            update + 1 - start_update) / max(args.updates - start_update, 1)
-        t0 = time.perf_counter()
-        if polish:
-            lr_now = min(cfg.lr + (cfg.lr_final - cfg.lr) * progress,
-                         POLISH_MAX_LR)
-            stats = algo.update(buf, last_obs, progress, lr_override=lr_now,
-                                ent_override=POLISH_ENT_COEF)
-        else:
-            stats = algo.update(buf, last_obs, progress)
-        sync()
-        t_update = time.perf_counter() - t0
-        t0 = time.perf_counter()
-        if sil_env is not None:
-            stats.update(silu.update(sil_env, sil_buf, args.sil_episodes,
-                                     rng, cfg.max_grad_norm))
-        sync()
-        t_sil = time.perf_counter() - t0
-        for d in (respawn_attempts, respawn_passes):
-            for b in d:
-                d[b] *= 0.99  # EMA: stats track the current policy
+            # Anneal position continues across resumes (progress0 from the ckpt).
+            progress = progress0 + (1.0 - progress0) * (
+                update + 1 - start_update) / max(args.updates - start_update, 1)
+            t0 = time.perf_counter()
+            if polish:
+                lr_now = min(cfg.lr + (cfg.lr_final - cfg.lr) * progress,
+                             POLISH_MAX_LR)
+                stats = algo.update(buf, last_obs, progress, lr_override=lr_now,
+                                    ent_override=POLISH_ENT_COEF)
+            else:
+                stats = algo.update(buf, last_obs, progress)
+            sync()
+            t_update = time.perf_counter() - t0
+            t0 = time.perf_counter()
+            if sil_env is not None:
+                stats.update(silu.update(sil_env, sil_buf, args.sil_episodes,
+                                         rng, cfg.max_grad_norm))
+            sync()
+            t_sil = time.perf_counter() - t0
+            for d in (respawn_attempts, respawn_passes):
+                for b in d:
+                    d[b] *= 0.99  # EMA: stats track the current policy
 
-        sps = ticks_window / max(time.time() - t_start, 1e-9)
-        t_start, ticks_window = time.time(), 0
-        total_wins += window_wins
-        n_eps = len(window_final_x)
-        mean_x = float(np.mean(window_final_x)) if n_eps else 0.0
-        max_x = float(np.max(window_final_x)) if n_eps else 0.0
-        win_rate = window_wins / n_eps if n_eps else 0.0
-        mean_ticks = float(np.mean(window_ep_ticks)) if n_eps else 0.0
+            sps = ticks_window / max(time.time() - t_start, 1e-9)
+            t_start, ticks_window = time.time(), 0
+            total_wins += window_wins
+            n_eps = len(window_final_x)
+            mean_x = float(np.mean(window_final_x)) if n_eps else 0.0
+            max_x = float(np.max(window_final_x)) if n_eps else 0.0
+            win_rate = window_wins / n_eps if n_eps else 0.0
+            mean_ticks = float(np.mean(window_ep_ticks)) if n_eps else 0.0
 
-        if not polish and not args.no_polish and (
-                (args.polish_at >= 0 and update + 1 >= args.polish_at)
-                or (args.polish_at < 0 and total_wins >= args.polish_wins)):
-            polish = True
-            model.logit_bound = POLISH_LOGIT_BOUND
-            respawn_prob = min(respawn_prob, POLISH_RESPAWN)
-            print(f"upd {update:4d} | POLISH: {total_wins} wins — logit "
-                  f"bound {POLISH_LOGIT_BOUND}, ent {POLISH_ENT_COEF}, "
-                  f"lr<={POLISH_MAX_LR}, respawn {respawn_prob}")
+            if not polish and not args.no_polish and (
+                    (args.polish_at >= 0 and update + 1 >= args.polish_at)
+                    or (args.polish_at < 0 and total_wins >= args.polish_wins)):
+                polish = True
+                model.logit_bound = POLISH_LOGIT_BOUND
+                respawn_prob = min(respawn_prob, POLISH_RESPAWN)
+                print(f"upd {update:4d} | POLISH: {total_wins} wins — logit "
+                      f"bound {POLISH_LOGIT_BOUND}, ent {POLISH_ENT_COEF}, "
+                      f"lr<={POLISH_MAX_LR}, respawn {respawn_prob}")
 
-        # Det eval: collect the previous eval's result (waiting only if a
-        # new one is due or this is the last update), then launch the next.
-        det_x, det_win = -1.0, False
-        det_due = args.det_every > 0 and (
-            (update + 1) % args.det_every == 0 or update + 1 == args.updates)
-        t0 = time.perf_counter()
-        det_results = [r for r in (det.poll(wait=det_due),) if r is not None]
-        if det_due:
-            det.start(model, algo.optimizer, update + 1,
-                      {"progress": progress, "mean_x": mean_x})
-            if update + 1 == args.updates:  # nothing left to overlap with
-                det_results.append(det.poll(wait=True))
-        t_det_wait = time.perf_counter() - t0
-        if det_results:
-            det_x, det_win, _ = det_results[-1]
+            # Det eval: collect the previous eval's result (waiting only if a
+            # new one is due or this is the last update), then launch the next.
+            det_x, det_win = -1.0, False
+            det_due = args.det_every > 0 and (
+                (update + 1) % args.det_every == 0 or update + 1 == args.updates)
+            t0 = time.perf_counter()
+            det_results = [r for r in (det.poll(wait=det_due),) if r is not None]
+            if det_due:
+                det.start(model, algo.optimizer, update + 1,
+                          {"progress": progress, "mean_x": mean_x})
+                if update + 1 == args.updates:  # nothing left to overlap with
+                    det_results.append(det.poll(wait=True))
+            t_det_wait = time.perf_counter() - t0
+            if det_results:
+                det_x, det_win, _ = det_results[-1]
 
-        row = (f"{update},{global_ticks},{mean_x:.1f},{max_x:.1f},"
-               f"{best_x:.1f},{win_rate:.4f},{n_eps},{mean_ticks:.0f},"
-               f"{sps:.0f},{stats['policy_loss']:.4f},"
-               f"{stats['value_loss']:.4f},{stats['entropy']:.4f},"
-               f"{stats['approx_kl']:.5f},{stats['clip_frac']:.4f},"
-               f"{stats['lr']:.6f},{det_x:.1f},{int(det_win)}")
-        det_str = (f" | det {det_x:7.1f}{' WIN' if det_win else ''}"
-                   if det_x >= 0 else "")
-        die_str = ""
-        if window_deaths:
-            hist: dict[int, int] = {}
-            for dxx in window_deaths:
-                hist[int(dxx // kBucket)] = hist.get(int(dxx // kBucket),
-                                                     0) + 1
-            top = sorted(hist.items(), key=lambda kv: -kv[1])[:3]
-            die_str = " | die " + " ".join(
-                f"{b * kBucket:.0f}x{c}" for b, c in top)
-        if tb:
-            for k, v in {**stats, "mean_final_x": mean_x, "best_x": best_x,
-                         "win_rate": win_rate, "sps": sps,
-                         "t_rollout": t_roll, "t_update": t_update,
-                         "t_sil": t_sil, "t_det_wait": t_det_wait,
-                         "t_roll_gpu": t_roll_gpu, "t_roll_env": t_roll_env,
-                         "t_roll_misc": t_roll_misc}.items():
-                tb.add_scalar(k, v, global_ticks)
-            if det_x >= 0:
-                tb.add_scalar("det_x", det_x, global_ticks)
+            row = (f"{update},{global_ticks},{mean_x:.1f},{max_x:.1f},"
+                   f"{best_x:.1f},{win_rate:.4f},{n_eps},{mean_ticks:.0f},"
+                   f"{sps:.0f},{stats['policy_loss']:.4f},"
+                   f"{stats['value_loss']:.4f},{stats['entropy']:.4f},"
+                   f"{stats['approx_kl']:.5f},{stats['clip_frac']:.4f},"
+                   f"{stats['lr']:.6f},{det_x:.1f},{int(det_win)}")
+            det_str = (f" | det {det_x:7.1f}{' WIN' if det_win else ''}"
+                       if det_x >= 0 else "")
+            die_str = ""
             if window_deaths:
-                tb.add_histogram("death_x", np.asarray(window_deaths),
-                                 global_ticks)
-        window_deaths.clear()
+                hist: dict[int, int] = {}
+                for dxx in window_deaths:
+                    hist[int(dxx // kBucket)] = hist.get(int(dxx // kBucket),
+                                                         0) + 1
+                top = sorted(hist.items(), key=lambda kv: -kv[1])[:3]
+                die_str = " | die " + " ".join(
+                    f"{b * kBucket:.0f}x{c}" for b, c in top)
+            if tb:
+                for k, v in {**stats, "mean_final_x": mean_x, "best_x": best_x,
+                             "win_rate": win_rate, "sps": sps,
+                             "t_rollout": t_roll, "t_update": t_update,
+                             "t_sil": t_sil, "t_det_wait": t_det_wait,
+                             "t_roll_gpu": t_roll_gpu, "t_roll_env": t_roll_env,
+                             "t_roll_misc": t_roll_misc}.items():
+                    tb.add_scalar(k, v, global_ticks)
+                if det_x >= 0:
+                    tb.add_scalar("det_x", det_x, global_ticks)
+                if window_deaths:
+                    tb.add_histogram("death_x", np.asarray(window_deaths),
+                                     global_ticks)
+            window_deaths.clear()
 
-        # Frontier stall -> re-run the chained explorer, but only when the
-        # bank doesn't already extend past the stuck wall (bucket FIFO churn
-        # or a fresh resume can lose far coverage). If coverage exists, a
-        # stall is a learning problem, not an exploration problem — respawn
-        # practice already trains both sides of the wall.
-        if window_reach > frontier_x + 30.0:
-            frontier_x = window_reach
-            stall_count = 0
-        else:
-            stall_count += 1
-        if (stall_count >= 6 and frontier_x > 1000.0
-                and frontier_x < env.end_x - 200.0):
-            if bank_deepest() < frontier_x + 500.0:
-                n_banked, deep = explore_chain(48)
-                print(f"upd {update:4d} | EXPLORE: stall at "
-                      f"{frontier_x:.0f}, banked {n_banked} states, deepest "
-                      f"now {deep:.0f}")
-            stall_count = 0
+            # Frontier stall -> re-run the chained explorer, but only when the
+            # bank doesn't already extend past the stuck wall (bucket FIFO churn
+            # or a fresh resume can lose far coverage). If coverage exists, a
+            # stall is a learning problem, not an exploration problem — respawn
+            # practice already trains both sides of the wall.
+            if window_reach > frontier_x + 30.0:
+                frontier_x = window_reach
+                stall_count = 0
+            else:
+                stall_count += 1
+            if (stall_count >= 6 and frontier_x > 1000.0
+                    and frontier_x < env.end_x - 200.0):
+                if bank_deepest() < frontier_x + 500.0:
+                    n_banked, deep = explore_chain(48)
+                    print(f"upd {update:4d} | EXPLORE: stall at "
+                          f"{frontier_x:.0f}, banked {n_banked} states, deepest "
+                          f"now {deep:.0f}")
+                stall_count = 0
 
-        t0 = time.perf_counter()
-        if recorder.wins and len(recorder.wins) != wins_written:
-            traces.write(run_dir / "wins.gdtrace", recorder.wins)
-            wins_written = len(recorder.wins)
-        if (update + 1) % args.trace_every == 0:
-            recorder.dump_best(run_dir / "traces" / f"upd_{update + 1:05d}.gdtrace")
+            t0 = time.perf_counter()
+            if recorder.wins and len(recorder.wins) != wins_written:
+                traces.write(run_dir / "wins.gdtrace", recorder.wins)
+                wins_written = len(recorder.wins)
+            if (update + 1) % args.trace_every == 0:
+                recorder.dump_best(run_dir / "traces" / f"upd_{update + 1:05d}.gdtrace")
 
-        # Best-so-far by window mean: a later collapse (catastrophic
-        # forgetting) never costs the best policy — resume from ckpt_best.
-        if n_eps and mean_x > best_mean_x:
-            best_mean_x = mean_x
-            save_ckpt(run_dir / "ckpt_best.pt", update + 1, progress, mean_x)
-        # Best deterministic run gets its own checkpoint: it's the policy
-        # open-loop deployment actually replays — saved from the weight
-        # snapshot that produced the run, not the (newer) live model.
-        for dx_, _, det_snap in det_results:
-            if dx_ > best_det_x:
-                best_det_x = dx_
-                save_ckpt(run_dir / "ckpt_best_det.pt", det_snap["update"],
-                          det_snap["progress"], det_snap["mean_x"],
-                          model_state=det_snap["model"],
-                          opt_state=det_snap["optimizer"],
-                          logit_bound=det_snap["logit_bound"])
-        if (update + 1) % args.ckpt_every == 0 or update + 1 == args.updates:
-            save_ckpt(run_dir / "ckpt_latest.pt", update + 1, progress, mean_x)
-        t_ckpt = time.perf_counter() - t0
+            # Best-so-far by window mean: a later collapse (catastrophic
+            # forgetting) never costs the best policy — resume from ckpt_best.
+            if n_eps and mean_x > best_mean_x:
+                best_mean_x = mean_x
+                save_ckpt(run_dir / "ckpt_best.pt", update + 1, progress, mean_x)
+            # Best deterministic run gets its own checkpoint: it's the policy
+            # open-loop deployment actually replays — saved from the weight
+            # snapshot that produced the run, not the (newer) live model.
+            for dx_, _, det_snap in det_results:
+                if dx_ > best_det_x:
+                    best_det_x = dx_
+                    save_ckpt(run_dir / "ckpt_best_det.pt", det_snap["update"],
+                              det_snap["progress"], det_snap["mean_x"],
+                              model_state=det_snap["model"],
+                              opt_state=det_snap["optimizer"],
+                              logit_bound=det_snap["logit_bound"])
+            if (update + 1) % args.ckpt_every == 0 or update + 1 == args.updates:
+                save_ckpt(run_dir / "ckpt_latest.pt", update + 1, progress, mean_x)
+            t_ckpt = time.perf_counter() - t0
 
-        t_total = time.perf_counter() - t_upd0
-        samples_s = cfg.rollout_steps * env.n_envs / max(t_total, 1e-9)
-        with open(log_path, "a") as f:
-            f.write(row + f",{samples_s:.0f},{t_roll:.3f},{t_update:.3f},"
-                          f"{t_sil:.3f},{t_det_wait:.3f},{t_ckpt:.3f},"
-                          f"{t_roll_gpu:.3f},{t_roll_env:.3f},"
-                          f"{t_roll_misc:.3f}\n")
-        print(f"upd {update:4d} | x {mean_x:7.1f} avg {max_x:7.1f} max "
-              f"(best {best_x:7.1f}, {100 * best_x / env.end_x:5.1f}%) | "
-              f"win {win_rate:.2%} | {sps / 1e6:.2f}M ticks/s | "
-              f"ent {stats['entropy']:.3f}{det_str}{die_str}"
-              f" | {t_roll:.2f}s roll ({t_roll_gpu:.2f} gpu {t_roll_env:.2f} "
-              f"env {t_roll_misc:.2f} misc) {t_update:.2f}s upd"
-              f"{f' {t_sil:.2f}s sil' if sil_env is not None else ''}"
-              f"{f' {t_det_wait:.2f}s detwait' if t_det_wait > 0.01 else ''}")
+            t_total = time.perf_counter() - t_upd0
+            samples_s = cfg.rollout_steps * env.n_envs / max(t_total, 1e-9)
+            with open(log_path, "a") as f:
+                f.write(row + f",{samples_s:.0f},{t_roll:.3f},{t_update:.3f},"
+                              f"{t_sil:.3f},{t_det_wait:.3f},{t_ckpt:.3f},"
+                              f"{t_roll_gpu:.3f},{t_roll_env:.3f},"
+                              f"{t_roll_misc:.3f}\n")
+            print(f"upd {update:4d} | x {mean_x:7.1f} avg {max_x:7.1f} max "
+                  f"(best {best_x:7.1f}, {100 * best_x / env.end_x:5.1f}%) | "
+                  f"win {win_rate:.2%} | {sps / 1e6:.2f}M ticks/s | "
+                  f"ent {stats['entropy']:.3f}{det_str}{die_str}"
+                  f" | {t_roll:.2f}s roll ({t_roll_gpu:.2f} gpu {t_roll_env:.2f} "
+                  f"env {t_roll_misc:.2f} misc) {t_update:.2f}s upd"
+                  f"{f' {t_sil:.2f}s sil' if sil_env is not None else ''}"
+                  f"{f' {t_det_wait:.2f}s detwait' if t_det_wait > 0.01 else ''}")
 
-        # Auto-rollback: a sustained crash of from-start progress means the
-        # policy forgot the prefix — restore the best policy instead of
-        # grinding back up from scratch.
-        if n_eps and best_mean_x > 2000.0 and mean_x < 0.4 * best_mean_x:
-            collapse_count += 1
-        else:
-            collapse_count = 0
-        best_path = run_dir / "ckpt_best.pt"
-        if collapse_count >= 6 and best_path.exists():
-            ckpt = torch.load(best_path, map_location=device,
-                              weights_only=False)
-            model.load_state_dict(ckpt["model"])
-            algo.optimizer.load_state_dict(ckpt["optimizer"])
-            collapse_count = 0
-            print(f"upd {update:4d} | COLLAPSE — rolled back to ckpt_best "
-                  f"(mean_x {ckpt.get('mean_final_x', 0):.0f})")
+            # Auto-rollback: a sustained crash of from-start progress means the
+            # policy forgot the prefix — restore the best policy instead of
+            # grinding back up from scratch.
+            if n_eps and best_mean_x > 2000.0 and mean_x < 0.4 * best_mean_x:
+                collapse_count += 1
+            else:
+                collapse_count = 0
+            best_path = run_dir / "ckpt_best.pt"
+            if collapse_count >= 6 and best_path.exists():
+                ckpt = torch.load(best_path, map_location=device,
+                                  weights_only=False)
+                model.load_state_dict(ckpt["model"])
+                algo.optimizer.load_state_dict(ckpt["optimizer"])
+                collapse_count = 0
+                print(f"upd {update:4d} | COLLAPSE — rolled back to ckpt_best "
+                      f"(mean_x {ckpt.get('mean_final_x', 0):.0f})")
+
+            if stop_path.exists():
+                stopped = True
+                stop_path.unlink(missing_ok=True)
+                break
+    except KeyboardInterrupt:
+        stopped = True
+
+    if stopped:
+        save_ckpt(run_dir / "ckpt_latest.pt", update + 1, progress, mean_x)
+        print(f"stopped: at update {update + 1}; ckpt_latest saved "
+              f"(resume with --resume {run_dir / 'ckpt_latest.pt'})")
 
     print(f"done: {total_wins} wins / {total_episodes} episodes, "
           f"best x {best_x:.1f} ({100 * best_x / env.end_x:.1f}%)")
