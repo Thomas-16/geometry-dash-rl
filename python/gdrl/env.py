@@ -17,7 +17,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 # Observation contract this code was written against (obs.hpp kObsVersion).
 # A mismatch means a stale gdenv.dll — features would silently differ from
 # what checkpoints/models assume.
-OBS_VERSION = 3
+OBS_VERSION = 4
 
 
 def _find_dll() -> Path:

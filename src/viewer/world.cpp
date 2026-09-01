@@ -371,6 +371,7 @@ void drawHitboxes(const App& app, const Camera2D& cam) {
             case gdcore::SpecialKind::GravityPad: c = Color{90, 170, 255, 255}; break;
             case gdcore::SpecialKind::GravityNormal: c = Color{90, 170, 255, 255}; break;
             case gdcore::SpecialKind::GravityFlip: c = Color{255, 230, 60, 255}; break;
+            case gdcore::SpecialKind::YellowRing: c = Color{255, 200, 40, 255}; break;
         }
         DrawRectangleRec(r, Color{c.r, c.g, c.b, 60});
         DrawRectangleLinesEx(r, lw, c);

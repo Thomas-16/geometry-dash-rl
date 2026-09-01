@@ -37,11 +37,20 @@ struct Portal {
 // (GameObject::activatedByPlayer / hasBeenActivatedByPlayer gate the loop);
 // gravity portals are idempotent (GJBaseGameLayer::flipGravity is a no-op
 // when the player already has the requested gravity).
+//
+// Rings (jump orbs, Polargeist id 36 = type 11 YellowJumpRing) are also
+// dispatched here (jump table 0x215fe0 -> GJBaseGameLayer::playerTouchedRing
+// 0x217e40) but do NOT act on contact: the ring is recorded in the player's
+// m_touchingRings and PlayerObject::ringJump (0x398c00) only fires when the
+// player has an unconsumed press (see PlayerState::hasJustHeld). A fired
+// ring is marked activatedByPlayer, so it is one-shot per attempt exactly
+// like a pad.
 enum class SpecialKind : uint8_t {
     YellowPad,      // id 35, type 8: propellPlayer(bumpMod 1.0) -> |yvel| 16
     GravityPad,     // id 67, type 10: propellPlayer(0.8) -> 12.8, then flip
     GravityNormal,  // id 10, type 4: flipGravity(false)
     GravityFlip,    // id 11, type 3: flipGravity(true)
+    YellowRing,     // id 36, type 11: ringJump -> yvel = +-jump (11.18)
 };
 
 struct Special {
@@ -58,7 +67,7 @@ struct LevelGeometry {
     std::vector<Box> solids;      // sorted by left
     std::vector<Box> hazards;     // sorted by left
     std::vector<Portal> portals;  // mode portals, sorted by left
-    std::vector<Special> specials;  // pads + gravity portals, sorted by left
+    std::vector<Special> specials;  // pads, gravity portals, rings; by left
 
     static LevelGeometry build(const gd::Level& level);
 };

@@ -1,5 +1,5 @@
-// Object-id -> sprite-frame table for the Stereo Madness + Back On Track
-// object sets.
+// Object-id -> sprite-frame table for the Stereo Madness, Back On Track and
+// Polargeist object sets.
 // Presentation-only viewer data (like the old shape table); NOT hitbox or
 // collision truth. Mapping cross-checked against OpenGD's GameObject table
 // and verified against the GJ_GameSheet-uhd / GJ_GameSheet02-uhd atlases.
@@ -44,6 +44,9 @@ inline const RenderSpec* renderSpec(int id) {
         {11, {"portal_02_back_001.png", "portal_02_front_001.png"}, 3, Tint::Obj},
         {35, {"bump_01_001.png"}, 2, Tint::Obj},
         {67, {"gravbump_01_001.png"}, 2, Tint::Obj},
+        // Polargeist: yellow jump ring, glow chain
+        {36, {"ring_01_001.png"}, 3, Tint::Obj},
+        {110, {"d_chain_02_001.png"}, -2, Tint::Glow},
         {142, {"secretCoin_01_001.png"}, 3, Tint::Obj},
         {15, {"rod_01_001.png"}, -1, Tint::Obj},
         {16, {"rod_02_001.png"}, -1, Tint::Obj},
@@ -62,6 +65,8 @@ inline const RenderSpec* renderSpec(int id) {
         {27, {}, 99, Tint::Obj},  // enter-effect: scale up
         {29, {}, 99, Tint::Obj},  // BG color trigger
         {30, {}, 99, Tint::Obj},  // ground color trigger
+        {32, {}, 99, Tint::Obj},  // line/ground toggle triggers (type 20)
+        {33, {}, 99, Tint::Obj},
     };
     for (const auto& s : specs)
         if (s.id == id) return &s;

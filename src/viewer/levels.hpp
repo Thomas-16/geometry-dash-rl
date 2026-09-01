@@ -2,8 +2,10 @@
 // under <Resources>/<song>.mp3, and whether the replica sim is verified for it.
 // Stereo Madness and Back On Track have engine-extracted hitbox tables
 // (core/geometry.cpp) and trace-verified physics (traces/session2-7,
-// including full completions of both); every other entry renders but its
-// sim is unverified, which the GUI labels loudly.
+// including full completions of both); Polargeist's jump rings are
+// trace-verified too (traces/session8, 39 orb activations, 75% of the
+// level). Every other entry renders but its sim is unverified, which the
+// GUI labels loudly.
 #pragma once
 
 #include <cstddef>
@@ -20,7 +22,7 @@ struct LevelInfo {
 inline constexpr LevelInfo kLevels[] = {
     {1, "Stereo Madness", "StereoMadness", true},
     {2, "Back On Track", "BackOnTrack", true},
-    {3, "Polargeist", "Polargeist", false},
+    {3, "Polargeist", "Polargeist", true},
     {4, "Dry Out", "DryOut", false},
     {5, "Base After Base", "BaseAfterBase", false},
     {6, "Can't Let Go", "CantLetGo", false},

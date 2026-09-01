@@ -495,7 +495,7 @@ void Gui::drawHeader(App& app, Mode* const* modes, int modeCount, int cur) {
         }
         if (curInfo && !curInfo->verified)
             ImGui::TextColored(ImVec4(1, 0.75f, 0.3f, 1),
-                               "sim unverified for this level (hitboxes/physics are SM-only)");
+                               "sim unverified for this level (no real-game traces checked yet)");
     }
 
     // View toggles

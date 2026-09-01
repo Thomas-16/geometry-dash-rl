@@ -19,10 +19,17 @@ namespace {
 //
 // Gravity portal (10/11): 25x75 as the engine reports it (session7
 // objects.csv: rw,rh 75x25 for the -90-degree portal at x 10455).
+//
+// Yellow jump ring (36, Polargeist): customSetup case at 0x191c75 sets
+// m_objectType 11 and the rect scale +0x394/+0x398 = 0x3f99999a (1.2f) on
+// the 30x30 ring_01 frame -> 36x36, no circle radius (+0x38c stays 0), so
+// contact is the same touch-inclusive CCRect test as every other special.
+// Disassembly-derived; confirm against the level-3 objects.csv dump.
 struct HitboxSpec {
     int id;
     char kind; // 's' solid, 'h' hazard, 'p' yellow pad, 'g' gravity pad,
-               // 'n' normal-gravity portal, 'f' flip-gravity portal
+               // 'n' normal-gravity portal, 'f' flip-gravity portal,
+               // 'r' yellow jump ring
     float w, h;
 };
 
@@ -34,6 +41,7 @@ constexpr HitboxSpec kHitboxes[] = {
     {103, 'h', 4.0f, 7.6f},
     {35, 'p', 25.0f, 4.0f},  {67, 'g', 25.0f, 6.0f},
     {10, 'n', 25.0f, 75.0f}, {11, 'f', 25.0f, 75.0f},
+    {36, 'r', 30.0f * 1.2f, 30.0f * 1.2f},
 };
 
 const HitboxSpec* findSpec(int id) {
@@ -97,6 +105,9 @@ LevelGeometry LevelGeometry::build(const gd::Level& level) {
                 break;
             case 'f':
                 g.specials.push_back(Special{b, SpecialKind::GravityFlip, false});
+                break;
+            case 'r':
+                g.specials.push_back(Special{b, SpecialKind::YellowRing, false});
                 break;
         }
     }

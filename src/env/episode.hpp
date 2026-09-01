@@ -14,11 +14,14 @@
 // ~26 no-op air decisions per hop and push the fatal choice ~26 decisions
 // before the death. Instead:
 //   - on the ground, action 1 = one whole hop as ONE env step (hold until
-//     liftoff, release, roll ticks until landing/death/win/mode switch)
+//     liftoff, release, roll ticks until landing/death/win/mode switch —
+//     or until a jump ring becomes pressable, which is the one mid-air
+//     moment where a click matters)
 //   - action 0 = walk ticksPerAction ticks
 //   - airborne cube or ship mode = hold/release for ticksPerAction ticks
 //     (ship is continuous control; a held cube buffers a landing re-jump,
-//     exactly like the real game)
+//     exactly like the real game; a fresh hold inside a ring fires it, a
+//     hold started before the ring fires it on contact)
 // Steps have variable duration; StepResult.ticks feeds SMDP discounting
 // (gamma^ticks) in the trainer. Per-tick holds are recorded so an episode
 // replays exactly.
@@ -26,9 +29,10 @@ namespace gdenv {
 
 struct EnvConfig {
     int ticksPerAction = 4; // walk/ship granularity (one 60 fps frame)
-    // Safety net; a full Stereo Madness run is ~20,354 ticks and x advances
-    // unconditionally, so this never fires in practice.
-    int maxTicks = 21600;
+    // Safety net; x advances unconditionally, so this never fires in
+    // practice (full runs: Stereo Madness ~20,354 ticks, Polargeist
+    // ~21,330).
+    int maxTicks = 30000;
     int maxJumpTicks = 300;             // hop macro hard cap (one hop ~104)
     float progressScale = 1.0f / 30.0f; // reward per block of x progress
     float deathPenalty = 5.0f;
@@ -90,7 +94,8 @@ struct EnvInstance {
                 if (tickOnce(true)) goto done;
                 wasShip = s.ship;
             }
-            while (!s.onGround && !s.ship && r.ticks < cfg.maxJumpTicks) {
+            while (!s.onGround && !s.ship && r.ticks < cfg.maxJumpTicks &&
+                   gdcore::pressableRing(s) < 0) {
                 if (tickOnce(false)) goto done;
             }
         } else {

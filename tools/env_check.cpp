@@ -12,7 +12,7 @@
 //                                x is inside [x0, x1] (default: everything)
 //
 // The level comes from GD_LEVEL_PATH (default Stereo Madness); Back On
-// Track is <install>/Resources/levels/2.txt.
+// Track is <install>/Resources/levels/2.txt, Polargeist 3.txt.
 #include "core/level.hpp"
 #include "core/physics.hpp"
 #include "env/episode.hpp"
@@ -44,6 +44,10 @@ void printObs(const float* obs) {
                 "ceil=(%.3f,%.3f) dx=%.4f\n",
                 obs[8], obs[9], obs[14], obs[15], obs[10], obs[11], obs[12],
                 obs[13], obs[16]);
+    std::printf("grav=%.0f sp1=(%.3f,%.3f,%.2f) sp2=(%.3f,%.3f,%.2f) "
+                "ringPress=%.0f bufArmed=%.0f\n",
+                obs[17], obs[18], obs[19], obs[20], obs[21], obs[22], obs[23],
+                obs[24], obs[25]);
     const float* solid = obs + gdenv::kPlayerDim;
     const float* hazard = solid + gdenv::kGridDim;
     // top row first; player column is col 0
@@ -115,11 +119,13 @@ int main(int argc, char** argv) {
                 if (tick >= r.first && tick <= r.second) hold = true;
             gdcore::step(s, cfg, geom, hold);
             if (trace && s.x >= x0 && s.x <= x1)
-                std::printf("t=%5d x=%9.3f y=%9.4f yvel=%8.3f%s%s%s%s\n",
+                std::printf("t=%5d x=%9.3f y=%9.4f yvel=%8.3f%s%s%s%s%s%s\n",
                             tick + 1, s.x, s.y, s.yvel,
                             s.onGround ? " ground" : "",
                             s.ship ? " ship" : "",
                             s.upsideDown ? " FLIPPED" : "",
+                            gdcore::pressableRing(s) >= 0 ? " RING" : "",
+                            (s.holding && s.hasJustHeld) ? " armed" : "",
                             s.dead ? " DEAD" : "");
             if (s.dead || s.x >= endX) {
                 std::printf("%s at tick %d, x=%.2f (%.1f%%)\n",

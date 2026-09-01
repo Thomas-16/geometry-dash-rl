@@ -56,6 +56,34 @@ namespace gdcore {
 // +15 and "landing" is on an object's BOTTOM face at y = bottom - 15. There
 // is no ceiling for the flipped classic cube (checkCollisions' band snap is
 // ship/dual only): the player "falls" upward until it meets a solid.
+//
+// Jump rings (Polargeist: yellow orb id 36, type 11). From the 2.2081
+// disassembly (PlayerObject::pushButton 0x397f40, releaseButton 0x3981d0,
+// ringJump 0x398c00, resetTouchedRings 0x3982e0, update() tail 0x389f09,
+// GJBaseGameLayer::playerTouchedRing 0x217e40):
+//   - pushButton sets m_isHolding (+0x985) AND m_hasJustHeld (+0x986);
+//     releaseButton clears both (one 16-bit store). A cube jump (updateJump
+//     0x38bbef) and a ring jump consume m_hasJustHeld. The end of update()
+//     snapshots both into +0x989/+0x98a and zeroes the per-tick "ring used"
+//     byte +0x98b — so within one tick at most one ring fires.
+//   - contact phase: playerTouchedRing adds the ring to m_touchingRings and
+//     calls ringJump(ring), which fires only if the snapshots say the player
+//     is holding with an unconsumed press (a press BEFORE reaching the ring,
+//     i.e. the classic "buffered" orb) and the mode is not flying.
+//   - input phase: pushButton with m_touchingRings non-empty calls ringJump
+//     on the touching rings (36-type custom rings first, then the rest;
+//     only the first passes the +0x98b guard) INSTEAD of the ground jump.
+//     m_touchingRings is pruned by resetTouchedRings(false) only after the
+//     next tick's input (GJBaseGameLayer::update: processCommands ->
+//     resetTouchedRings -> ... -> checkCollisions), so a press can still
+//     fire a ring the player overlapped on the previous tick.
+//   - ringJump (type 11 default branch 0x3991fe): m_canJump (+0x9c1) = 0,
+//     yvel = round3(f64(f32(sign) * f32(m_jumpAccel +0x7c0) * sizeMul)) —
+//     the same 11.18 as the ground jump — then activatedByPlayer marks the
+//     ring used for the rest of the attempt (collisionCheckObjects skips
+//     objects whose hasBeenActivatedByPlayer is set). m_isOnGround is NOT
+//     touched, but m_canJump is what the hold re-jump tests, so the sim
+//     clears onGround.
 struct PhysicsConfig {
     float dx;        // per-tick x advance
     double gravity;  // per-tick yvel decrement (float precision, as double)
@@ -191,6 +219,19 @@ struct PlayerState {
     // into 30 units of x).
     int specialCursor = 0;
     uint64_t specialDone = 0;
+    // m_hasJustHeld (+0x986): the current press has not been spent on a
+    // jump or ring yet. Set by a fresh press, cleared by release, by any
+    // cube jump and by a ring jump.
+    bool hasJustHeld = false;
+    // m_touchingRings as the input phase sees it: rings (indices into
+    // LevelGeometry::specials) the player box overlapped in this tick's
+    // contact phase (ringNow) and in the previous tick's (ringPrev, not yet
+    // pruned — see the ring notes above). Fired rings are removed.
+    static constexpr int kMaxTouchRings = 4;
+    int ringNow[kMaxTouchRings] = {};
+    int ringPrev[kMaxTouchRings] = {};
+    int nRingNow = 0;
+    int nRingPrev = 0;
 };
 
 namespace detail {
@@ -217,6 +258,50 @@ inline void forCandidates(const std::vector<T>& boxes, float x, float half,
 constexpr float kSpecialMaxW = 80.0f;
 
 } // namespace detail
+
+// One-shot record helpers (PlayerState::specialCursor/specialDone).
+inline bool specialDone(const PlayerState& s, int i) {
+    const int k = i - s.specialCursor;
+    return k >= 0 && k < 64 && ((s.specialDone >> k) & 1u);
+}
+inline void markSpecialDone(PlayerState& s, int i) {
+    const int k = i - s.specialCursor;
+    if (k >= 0 && k < 64) s.specialDone |= uint64_t{1} << k;
+}
+
+inline void removeRing(int* list, int& n, int idx) {
+    for (int i = 0; i < n; ++i)
+        if (list[i] == idx) {
+            for (int j = i + 1; j < n; ++j) list[j - 1] = list[j];
+            --n;
+            return;
+        }
+}
+
+// The ring pushButton would fire right now: m_touchingRings order is
+// insertion order, so last tick's contacts come first. Returns the special
+// index or -1.
+inline int pressableRing(const PlayerState& s) {
+    for (int i = 0; i < s.nRingPrev; ++i)
+        if (!specialDone(s, s.ringPrev[i])) return s.ringPrev[i];
+    for (int i = 0; i < s.nRingNow; ++i)
+        if (!specialDone(s, s.ringNow[i])) return s.ringNow[i];
+    return -1;
+}
+
+// PlayerObject::ringJump, yellow ring (type 11) branch.
+inline void fireRing(PlayerState& s, const PhysicsConfig& c, int idx) {
+    const float sign = s.upsideDown ? -1.0f : 1.0f;
+    // 0x3994ef: f32(sign) * f32(m_jumpAccel) * sizeMul (1.0 unless mini),
+    // through the 3-decimal velocity setter.
+    const float v = sign * static_cast<float>(c.jumpVel) * 1.0f;
+    s.yvel = roundVel(static_cast<double>(v));
+    s.onGround = false;    // m_canJump cleared (0x39920c)
+    s.hasJustHeld = false; // 0x3991ee
+    markSpecialDone(s, idx); // activatedByPlayer (0x399cbd)
+    removeRing(s.ringNow, s.nRingNow, idx);   // removeObject (0x398e3a)
+    removeRing(s.ringPrev, s.nRingPrev, idx);
+}
 
 inline void stepCubeSolids(PlayerState& s, const PhysicsConfig& c,
                            const LevelGeometry& g, float prevY);
@@ -246,6 +331,7 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
         if (s.onGround && s.holding) {
             s.yvel = sign * c.jumpVel;
             s.onGround = false;
+            s.hasJustHeld = false; // updateJump 0x38bbef
         } else {
             // updateJump fall path (0x14038c2b5): yvel -= f64(sign * f32(g))
             // then the clamp toward the gravity direction, both through the
@@ -314,11 +400,25 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
         if (s.dead) return;
     }
 
-    // 3. input: fresh click jumps immediately if grounded (cube only)
+    // 3. input (pushButton / releaseButton). A fresh press first looks at
+    // the touching rings (this tick's and last tick's contacts): if one is
+    // still unused it fires INSTEAD of the ground jump; otherwise a
+    // grounded cube jumps immediately. A press in the air with no ring
+    // just arms m_hasJustHeld for the next ring contact. Release clears
+    // both flags.
     const double sign2 = s.upsideDown ? -1.0 : 1.0;
-    if (!s.ship && holding && !s.holding && s.onGround) {
-        s.yvel = sign2 * c.jumpVel;
-        s.onGround = false;
+    if (holding && !s.holding) {
+        s.hasJustHeld = true;
+        const int ring = pressableRing(s);
+        if (ring >= 0) {
+            fireRing(s, c, ring);
+        } else if (!s.ship && s.onGround) {
+            s.yvel = sign2 * c.jumpVel;
+            s.onGround = false;
+            s.hasJustHeld = false;
+        }
+    } else if (!holding && s.holding) {
+        s.hasJustHeld = false;
     }
     s.holding = holding;
     if (s.sinceSwitch < (1 << 20)) ++s.sinceSwitch;
@@ -332,6 +432,11 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
 // overlaps a pad and a mode portal on one tick.
 inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
                          const LevelGeometry& g) {
+    // m_touchingRings bookkeeping: this tick's contacts are collected
+    // fresh; last tick's survive until after the input phase.
+    for (int i = 0; i < s.nRingNow; ++i) s.ringPrev[i] = s.ringNow[i];
+    s.nRingPrev = s.nRingNow;
+    s.nRingNow = 0;
     // roll the one-shot activation window past everything already passed
     const float left = s.x - c.half;
     while (s.specialCursor < static_cast<int>(g.specials.size()) &&
@@ -377,6 +482,20 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
                 s.upsideDown = target;
                 s.yvel *= pad::kFlipDamp;
                 s.sinceFlip = 0;
+                break;
+            }
+            case SpecialKind::YellowRing: {
+                if (done) break; // hasBeenActivatedByPlayer: skipped at 0x214a8c
+                // playerTouchedRing: remember the contact, then ringJump,
+                // which fires only for a non-flying player holding an
+                // unconsumed press (+0x989/+0x98a snapshots taken at the
+                // end of this tick's update(), +0x98b once per tick).
+                if (s.nRingNow < PlayerState::kMaxTouchRings) {
+                    bool have = false;
+                    for (int j = 0; j < s.nRingNow; ++j) have |= s.ringNow[j] == i;
+                    if (!have) s.ringNow[s.nRingNow++] = i;
+                }
+                if (!s.ship && s.holding && s.hasJustHeld) fireRing(s, c, i);
                 break;
             }
         }

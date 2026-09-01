@@ -33,12 +33,15 @@ constexpr int kGridDim = kGridRows * kGridCols;  // per channel
 // reserved). Obs v3 (Back On Track): scalar 17 becomes the gravity flag
 // (it was the reserved mode slot, always 0 before) and scalars 18-23 are
 // appended — the next two activatable objects ahead (pads / gravity
-// portals): distance, dy, kind. Scalars 0-16 and the grid layout are
-// frozen — additions bump kObsVersion and only ever append.
+// portals): distance, dy, kind. Obs v4 (Polargeist): jump rings join the
+// specials list (kind +0.25) and scalars 24-25 are appended — "a press now
+// fires a ring" and "the held press is still unconsumed" (the two bits of
+// PlayerObject state that decide what a click does). Scalars 0-23 and the
+// grid layout are frozen — additions bump kObsVersion and only ever append.
 // gdenv_obs_version() exposes this so the Python side can refuse a stale
 // DLL.
-constexpr int kObsVersion = 3;
-constexpr int kPlayerDim = 24;
+constexpr int kObsVersion = 4;
+constexpr int kPlayerDim = 26;
 constexpr int kObsDim = kPlayerDim + 2 * kGridDim;
 
 namespace detail {
@@ -184,9 +187,10 @@ inline void buildObs(const gdcore::PlayerState& s,
     // them as sharply as it needs hazards. dist = left edge from the player
     // (0 while overlapping), dy = box bottom relative to the player, kind:
     // yellow pad +1, gravity pad -1, normal-gravity portal +0.5,
-    // flip-gravity portal -0.5. Already-activated pads are still reported
-    // (the featurizer has no activation state); they sit behind or under
-    // the player only briefly.
+    // flip-gravity portal -0.5, yellow jump ring +0.25 (obs v4).
+    // Already-activated pads/rings are still reported (the featurizer has
+    // no activation state); they sit behind or under the player only
+    // briefly.
     {
         float sd[2] = {1.0f, 1.0f}, sy[2] = {0.0f, 0.0f}, sk[2] = {0.0f, 0.0f};
         auto sit = std::lower_bound(
@@ -202,6 +206,7 @@ inline void buildObs(const gdcore::PlayerState& s,
                 case gdcore::SpecialKind::GravityPad: sk[k] = -1.0f; break;
                 case gdcore::SpecialKind::GravityNormal: sk[k] = 0.5f; break;
                 case gdcore::SpecialKind::GravityFlip: sk[k] = -0.5f; break;
+                case gdcore::SpecialKind::YellowRing: sk[k] = 0.25f; break;
             }
         }
         out[18] = sd[0];
@@ -211,6 +216,14 @@ inline void buildObs(const gdcore::PlayerState& s,
         out[22] = sy[1];
         out[23] = sk[1];
     }
+    // Ring input state (obs v4). [24]: a fresh press at this decision fires
+    // a ring (the player box overlapped an unused ring this tick or last
+    // tick — PlayerObject::m_touchingRings). [25]: the current hold still
+    // carries an unconsumed press, so the next ring contact fires by
+    // itself (m_isHolding && m_hasJustHeld). Both are exact engine state,
+    // computable in the Geode mod from PlayerObject fields.
+    out[24] = gdcore::pressableRing(s) >= 0 ? 1.0f : 0.0f;
+    out[25] = (s.holding && s.hasJustHeld) ? 1.0f : 0.0f;
 
     float* grid = out + kPlayerDim;
     std::memset(grid, 0, sizeof(float) * 2 * kGridDim);
