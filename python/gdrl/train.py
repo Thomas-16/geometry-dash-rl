@@ -260,12 +260,24 @@ def main():
         total_episodes = ckpt.get("total_episodes", 0)
         polish = ckpt.get("polish", False)
         model.logit_bound = ckpt.get("logit_bound", model.logit_bound)
+        # ckpt config holds the *requested* --end-x (-1 = full level).
+        prev_end = ckpt.get("config", {}).get("end_x", -1.0)
+        prev_full = prev_end is None or prev_end < 0
+        if (prev_full and args.end_x >= 0) or \
+                (not prev_full and abs(prev_end - env.end_x) > 0.5):
+            print(f"resume: end_x {'full' if prev_full else f'{prev_end:g}'} "
+                  f"-> {env.end_x:g}; earlier det wins/ckpt_best_det.pt were "
+                  f"for the old end")
         print(f"resumed from {args.resume} at update {start_update} "
               f"(arch {args.arch}{', polish' if polish else ''})")
     model = maybe_compile(model, args.compile)
 
     (run_dir / "config.json").write_text(json.dumps(
-        {**vars(args), "obs_dim": env.obs_dim, "end_x": env.end_x}, indent=2))
+        {**vars(args), "obs_dim": env.obs_dim, "end_x": env.end_x,
+         # end_x above is the *effective* end (a full-level run records the
+         # level's natural end); end_x_arg is what was asked for, so a
+         # resume/prefill of a full-level run never inherits a hard cutoff.
+         "end_x_arg": args.end_x}, indent=2))
     # Fresh (non-resume) runs truncate: appending a restarted run to the old
     # log makes the curves unreadable.
     log_path = run_dir / "log.csv"

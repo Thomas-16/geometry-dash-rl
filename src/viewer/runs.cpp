@@ -1,10 +1,14 @@
 #include "viewer/runs.hpp"
 
 #include "viewer/paths.hpp"
+#include "core/level.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <map>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -17,6 +21,31 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 namespace {
+
+// The env's default end (gdenv_c.cpp: max object x + 40) for a level file;
+// "" = the default level. Cached per path: scans rescan every few seconds.
+// 0 on failure.
+float naturalLevelEnd(const std::string& levelPath) {
+    static std::map<std::string, float> cache;
+    auto it = cache.find(levelPath);
+    if (it != cache.end()) return it->second;
+    float end = 0.0f;
+    try {
+        std::string path = levelPath;
+        if (path.empty()) {
+            if (const char* env = std::getenv("GD_LEVEL_PATH")) path = env;
+            else path = paths::levelPath(1).generic_string();  // trainer default = Stereo Madness
+        }
+        gd::Level level = gd::Level::loadFromFile(path);
+        float maxX = 0.0f;
+        for (const auto& o : level.objects) maxX = std::max(maxX, o.x);
+        end = maxX + 40.0f;
+    } catch (...) {
+        end = 0.0f;
+    }
+    cache[levelPath] = end;
+    return end;
+}
 
 uint32_t rdU32(const unsigned char* p) {
     uint32_t v;
@@ -377,6 +406,16 @@ std::vector<RunInfo> scanRuns() {
                 r.arch = j.value("arch", std::string("mlp"));
                 r.amp = j.value("amp", std::string(""));
                 if (j.contains("end_x") && j["end_x"].is_number()) r.endX = j["end_x"].get<float>();
+                if (j.contains("end_x_arg") && j["end_x_arg"].is_number()) {
+                    r.endXArg = j["end_x_arg"].get<float>();
+                } else if (r.endX > 0) {
+                    // Legacy config.json: end_x is the effective end, so a full-level
+                    // run looks identical to a curriculum run that happens to stop at
+                    // the level's natural end. Compare against that end to tell them
+                    // apart (this is how level-2's 25045 leaked into level-3 runs).
+                    float natural = naturalLevelEnd(r.levelPath);
+                    r.endXArg = (natural > 0 && std::fabs(r.endX - natural) < 0.5f) ? -1.0f : r.endX;
+                }
             }
         }
         std::vector<LogRow> rows;

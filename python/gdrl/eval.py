@@ -65,6 +65,12 @@ def main():
     run_dir = Path(args.checkpoint).resolve().parent
     amp = args.amp or ckpt.get("config", {}).get("amp", "none")
 
+    trained_end = ckpt.get("config", {}).get("end_x_arg", -1.0)
+    if trained_end is not None and trained_end > 0 and args.end_x < 0:
+        print(f"WARNING: checkpoint was trained with --end-x {trained_end:g} "
+              f"(truncated level); evaluating on the full level, so its "
+              f"training 'det WIN's do not carry over")
+
     n = args.episodes + 1  # env 0 acts deterministically
     env = GdVecEnv(args.level, n, args.ticks_per_action, args.end_x)
     arch = ckpt.get("config", {}).get("arch", "mlp")

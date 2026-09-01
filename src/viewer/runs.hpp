@@ -66,7 +66,8 @@ struct RunInfo {
     std::string levelPath;  // "" = default (Stereo Madness)
     int nEnvs = 0, updates = 0;
     std::string arch, amp;
-    float endX = -1.0f;
+    float endX = -1.0f;     // effective end (config end_x; full level => natural end)
+    float endXArg = -1.0f;  // requested --end-x (-1 = full level); legacy configs infer it
     // files
     bool hasBestDet = false, hasBest = false, hasLatest = false;
     bool hasSolution = false, hasWins = false, hasEval = false, hasLive = false;

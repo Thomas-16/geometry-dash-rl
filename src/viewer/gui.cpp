@@ -294,12 +294,22 @@ void Gui::prefillResume(const RunInfo& r) {
     std::snprintf(form_.resume, sizeof form_.resume, "%s", fs::absolute(ckpt, ec).generic_string().c_str());
     if (r.nEnvs > 0) form_.nEnvs = r.nEnvs;
     if (r.updates > 0) form_.updates = r.updates;
-    form_.endX = r.endX > 0 && r.endX < 1e8f ? r.endX : -1.0f;
+    // Always the full level. Resuming exists to finish the level, and a
+    // curriculum cutoff carried over silently is how level-2's 25045 became a
+    // hard wall for level-3 runs. Anyone who wants the cutoff types it back in.
+    form_.endX = -1.0f;
     form_.arch = r.arch == "mlp" ? 1 : 0;
     form_.amp = r.amp == "none" ? 1 : 0;
     tab_ = 1;
     wantTab_ = true;
-    toast("Train tab prefilled to resume " + r.name + " (same run dir: log.csv is appended)");
+    if (r.endXArg > 0) {
+        char buf[256];
+        std::snprintf(buf, sizeof buf, "%s was trained with --end-x %.0f (truncated level) - resuming on the FULL level",
+                      r.name.c_str(), r.endXArg);
+        toast(buf, 12);
+    } else {
+        toast("Train tab prefilled to resume " + r.name + " (same run dir: log.csv is appended)");
+    }
 }
 
 // ------------------------------------------------------------------ pipeline
@@ -601,6 +611,10 @@ void Gui::drawTrainTab(App& app) {
     helpMarker("Don't shrink --updates for a regression check: the lr/entropy anneal spans the whole run.");
     ImGui::SetNextItemWidth(120); ImGui::InputFloat("end-x", &form_.endX, 0, 0, "%g");
     helpMarker("-1 = full level. A curriculum end-x makes solutions that deploy.py cannot verify.");
+    if (form_.endX > 0) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1, 0.75f, 0.3f, 1), "TRUNCATED (not the full level)");
+    }
     ImGui::SameLine(); ImGui::SetNextItemWidth(100); ImGui::InputFloat("respawn", &form_.respawn, 0, 0, "%g");
     ImGui::SetNextItemWidth(120); ImGui::InputFloat("lr", &form_.lr, 0, 0, "%g");
     ImGui::SameLine(); ImGui::SetNextItemWidth(100); ImGui::InputFloat("ent-coef", &form_.entCoef, 0, 0, "%g");
@@ -765,10 +779,19 @@ void Gui::drawRunsTab(App& app) {
             if (r.hasLog) ImGui::Text("%d/%d", r.last.update + 1, r.updates);
             else ImGui::TextDisabled("-");
             ImGui::TableNextColumn();
-            if (r.hasLog && r.endX > 0) ImGui::Text("%.1f", 100.0f * r.last.bestXEver / r.endX);
-            else ImGui::TextDisabled("-");
+            // Percentages are relative to the run's own end_x; a curriculum
+            // (--end-x) run is flagged so "100%" is never read as a full level.
+            const bool cut = r.endXArg > 0;
+            const ImVec4 cutCol(1, 0.75f, 0.3f, 1);
+            if (r.hasLog && r.endX > 0) {
+                if (cut) ImGui::TextColored(cutCol, "%.1f*", 100.0f * r.last.bestXEver / r.endX);
+                else ImGui::Text("%.1f", 100.0f * r.last.bestXEver / r.endX);
+            } else ImGui::TextDisabled("-");
+            if (cut && ImGui::IsItemHovered())
+                ImGui::SetTooltip("trained with --end-x %.0f (truncated level): %% is of the cutoff, "
+                                  "det wins are not full-level wins and eval cannot write a solution", r.endX);
             ImGui::TableNextColumn();
-            if (r.detWins) ImGui::TextColored(ImVec4(0.5f, 1, 0.5f, 1), "WIN x%d", r.detWins);
+            if (r.detWins) ImGui::TextColored(cut ? cutCol : ImVec4(0.5f, 1, 0.5f, 1), "WIN x%d%s", r.detWins, cut ? "*" : "");
             else if (r.bestDetX >= 0 && r.endX > 0) ImGui::Text("%.0f%%", 100.0f * r.bestDetX / r.endX);
             else ImGui::TextDisabled("-");
             ImGui::TableNextColumn();
@@ -787,8 +810,9 @@ void Gui::drawRunsTab(App& app) {
     ImGui::Separator();
     ImGui::Text("%s", r->name.c_str());
     if (r->hasConfig)
-        ImGui::TextDisabled("level %d  n_envs %d  updates %d  arch %s  amp %s  end_x %.0f", r->levelId, r->nEnvs,
-                            r->updates, r->arch.c_str(), r->amp.c_str(), r->endX);
+        ImGui::TextDisabled("level %d  n_envs %d  updates %d  arch %s  amp %s  end_x %.0f%s", r->levelId, r->nEnvs,
+                            r->updates, r->arch.c_str(), r->amp.c_str(), r->endX,
+                            r->endXArg > 0 ? "  (TRUNCATED via --end-x)" : "");
     if (r->hasLog)
         ImGui::TextDisabled("last: upd %d  mean %.0f  best %.0f  win %.2f%%  det %.0f%s", r->last.update,
                             r->last.meanFinalX, r->last.bestXEver, r->last.winRate * 100.0f, r->last.detX,
