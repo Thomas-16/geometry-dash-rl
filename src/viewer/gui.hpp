@@ -72,7 +72,8 @@ private:
     };
     struct TrainStatus {
         int update = -1;
-        float meanX = 0, maxX = 0, bestX = 0, bestPct = 0, winRate = 0, sps = 0, entropy = 0;
+        float meanX = 0, maxX = 0, bestX = 0, bestPct = 0, winRate = 0, sps = 0, decS = 0,
+              entropy = 0;
         float detX = -1;
         bool detWin = false;
         std::string phase;  // explore / polish / collapse / stopped / done

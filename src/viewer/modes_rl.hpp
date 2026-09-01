@@ -73,6 +73,7 @@ public:
     void update(App&) override;
     void draw(const App&) override;
     void drawPanel(App&) override;
+    int targetFps(const App& app) const override { return app.livePreview ? 60 : 30; }
 
     void watch(const std::string& livePath);
 
@@ -80,7 +81,8 @@ private:
     struct Snapshot {
         uint64_t globalTicks = 0;
         float bestX = 0.0f;
-        float sps = 0.0f;
+        float sps = 0.0f;       // sim ticks/s of the last completed update
+        float samplesS = 0.0f;  // decisions/s of the last completed update
         uint32_t episodes = 0;
         uint32_t seq = 0;
         // per env: x, y, yvel + ship/dead flags
@@ -93,6 +95,8 @@ private:
 
     std::string path_;
     Snapshot snap_;
+    std::vector<unsigned char> rec_;        // payload staging, reused per frame
+    std::vector<Color> tint_, tintDark_;    // ghost palette, built once per n
     bool follow_ = true;
     float camY_ = 0.0f;
     Camera2D cam_{};

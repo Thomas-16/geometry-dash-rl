@@ -99,6 +99,7 @@ void Gui::savePrefs(const App& app) {
     prefs_.setFloat("train_end_x", form_.endX);
     prefs_.setBool("textures", app.useTextures);
     prefs_.setBool("hitboxes", app.showHitboxes);
+    prefs_.setBool("live_preview", app.livePreview);
     prefs_.save();
 }
 
@@ -305,7 +306,7 @@ void Gui::prefillResume(const RunInfo& r) {
 
 void Gui::pollPipelines() {
     static const std::regex kUpd(
-        R"(^upd\s+(\d+) \| x\s+([-\d.]+) avg\s+([-\d.]+) max \(best\s+([-\d.]+),\s+([-\d.]+)%\) \| win ([\d.]+)% \| ([\d.]+)M ticks/s \| ent ([\d.]+))");
+        R"(^upd\s+(\d+) \| x\s+([-\d.]+) avg\s+([-\d.]+) max \(best\s+([-\d.]+),\s+([-\d.]+)%\) \| win ([\d.]+)% \| ([\d.]+)M ticks/s \| ([\d.]+)k dec/s \| ent ([\d.]+))");
     static const std::regex kDet(R"(\| det\s+([-\d.]+)( WIN)?)");
     std::vector<std::string> fresh;
     for (auto& [id, p] : pipelines_) {
@@ -324,7 +325,8 @@ void Gui::pollPipelines() {
                 p.status.bestPct = std::strtof(m[5].str().c_str(), nullptr);
                 p.status.winRate = std::strtof(m[6].str().c_str(), nullptr);
                 p.status.sps = std::strtof(m[7].str().c_str(), nullptr);
-                p.status.entropy = std::strtof(m[8].str().c_str(), nullptr);
+                p.status.decS = std::strtof(m[8].str().c_str(), nullptr);
+                p.status.entropy = std::strtof(m[9].str().c_str(), nullptr);
                 std::smatch d;
                 if (std::regex_search(line, d, kDet)) {
                     p.status.detX = std::strtof(d[1].str().c_str(), nullptr);
@@ -658,6 +660,12 @@ void Gui::drawTrainTab(App& app) {
         }
         ImGui::SameLine();
         if (ImGui::Button("Log")) { selectedJob_ = trainJob_; tab_ = 4; wantTab_ = true; }
+        ImGui::SameLine();
+        ImGui::Checkbox("Live preview", &app.livePreview);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Off: the Training view stops reading live.bin and drawing the ghosts\n"
+                              "and the viewer idles at 30 FPS (15 when unfocused), so the trainer\n"
+                              "keeps the whole GPU. The stats below and the plots keep updating.");
         if (ji) ImGui::Text("running %s", fmtSecs(Jobs::now() - ji->startTime).c_str());
     }
 
@@ -673,7 +681,8 @@ void Gui::drawTrainTab(App& app) {
         if (s.update >= 0) {
             ImGui::Text("upd %d   mean x %.0f   max %.0f   best %.0f (%.1f%%)", s.update, s.meanX, s.maxX,
                         s.bestX, s.bestPct);
-            ImGui::Text("win %.2f%%   %.2fM ticks/s   ent %.3f", s.winRate, s.sps, s.entropy);
+            ImGui::Text("win %.2f%%   %.2fM ticks/s   %.1fk dec/s   ent %.3f", s.winRate, s.sps, s.decS,
+                        s.entropy);
             if (s.detX >= 0)
                 ImGui::TextColored(s.detWin ? ImVec4(0.5f, 1, 0.5f, 1) : ImVec4(1, 1, 1, 1),
                                    "det x %.0f%s", s.detX, s.detWin ? "  WIN" : "");

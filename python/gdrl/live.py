@@ -2,10 +2,12 @@
 TrainingViewMode. Fixed-size mmap'd file; the writer bumps `seq` to odd,
 writes the payload, bumps to even. The viewer re-reads if it sees an odd or
 changed seq. Same-machine page-cache coherence makes 60 Hz polling free.
+`sps` (sim ticks/s) and `samples_s` (decisions/s) are the rates of the last
+*completed* update, identical to the trainer's `upd` log line.
 
 Layout (little-endian):
-  u32 magic 'GDLV', u32 version=1, u32 seq, u32 n_envs,
-  u64 global_ticks, f32 best_x_ever, f32 sps, u32 total_episodes, u32 pad
+  u32 magic 'GDLV', u32 version=2, u32 seq, u32 n_envs,
+  u64 global_ticks, f32 best_x_ever, f32 sps, u32 total_episodes, f32 samples_s
   then n_envs * {f32 x, f32 y, f32 yvel, u8 ship, u8 dead, u16 pad}
 """
 
@@ -18,8 +20,8 @@ from pathlib import Path
 import numpy as np
 
 MAGIC = 0x564C4447  # 'GDLV'
-VERSION = 1
-HEADER = struct.Struct("<IIIIQffII")
+VERSION = 2
+HEADER = struct.Struct("<IIIIQffIf")
 REC = 20  # f32 x, y, yvel + u8 ship, u8 dead + u16 pad
 
 
@@ -34,7 +36,8 @@ class LiveWriter:
         self._rec = np.zeros((n_envs, REC // 4), np.float32)  # staging
 
     def write(self, render_states: np.ndarray, global_ticks: int,
-              best_x: float, sps: float, episodes: int) -> None:
+              best_x: float, sps: float, episodes: int,
+              samples_s: float = 0.0) -> None:
         """render_states: [n, 5] = x, y, yvel, ship, dead from the env."""
         self._seq += 1  # odd: write in progress
         self._mm[8:12] = struct.pack("<I", self._seq)
@@ -48,7 +51,7 @@ class LiveWriter:
         self._seq += 1  # even: consistent
         self._mm[:HEADER.size] = HEADER.pack(
             MAGIC, VERSION, self._seq, self.n_envs, global_ticks,
-            float(best_x), float(sps), episodes, 0)
+            float(best_x), float(sps), episodes, float(samples_s))
 
     def close(self) -> None:
         self._mm.close()

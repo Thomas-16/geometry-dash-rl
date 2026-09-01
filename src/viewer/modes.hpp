@@ -22,6 +22,9 @@ public:
     virtual void draw(const App&) = 0;  // inside Begin/EndDrawing
     virtual void drawPanel(App&) {}     // ImGui widgets, inside the panel's View tab
     virtual void onLevelChanged(App&) {}  // app.level/geom were replaced
+    // Desired render rate; main.cpp drives SetTargetFPS from this (and
+    // halves it while a trainer runs in the background).
+    virtual int targetFps(const App&) const { return 60; }
 };
 
 class BrowseMode : public Mode {
@@ -42,6 +45,9 @@ private:
 class PlayMode : public Mode {
 public:
     const char* name() const override { return "Play"; }
+    // ~1 physics tick per frame, so hold/release edges quantize to 1/240s
+    // instead of 1/60s. Purely an input-resolution improvement.
+    int targetFps(const App&) const override { return 240; }
     void enter(App&) override;
     void exit(App&) override;
     void update(App&) override;

@@ -21,7 +21,6 @@ BrowseMode::BrowseMode(float camX, float zoom) {
 }
 
 void BrowseMode::enter(App&) {
-    SetTargetFPS(60);
 }
 
 void BrowseMode::update(App& app) {
@@ -90,9 +89,6 @@ void PlayMode::resetAttempt(App& app) {
 }
 
 void PlayMode::enter(App& app) {
-    // ~1 physics tick per frame, so hold/release edges quantize to 1/240s
-    // instead of 1/60s. Purely an input-resolution improvement.
-    SetTargetFPS(240);
     attempt_ = 1;
     won_ = false;
     paused_ = false;

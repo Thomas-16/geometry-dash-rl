@@ -175,6 +175,7 @@ int main(int argc, char** argv) {
     loadSheets(app);
     app.useTextures = app.textured && prefs.getBool("textures", true);
     app.showHitboxes = prefs.getBool("hitboxes", false);
+    app.livePreview = prefs.getBool("live_preview", true);
 
     gdv::Jobs jobs;
     gdv::Gui gui(prefs, jobs);
@@ -208,6 +209,7 @@ int main(int argc, char** argv) {
     SetExitKey(KEY_NULL);
 
     int frame = 0;
+    int curFps = 60;  // matches the SetTargetFPS(60) above
     while (!WindowShouldClose()) {
         gui.beginFrame(app);
 
@@ -252,6 +254,18 @@ int main(int argc, char** argv) {
             const char* name = TextFormat("shot_%lld.png", (long long)time(nullptr));
             TakeScreenshot(name);
             gui.toast(std::string("saved ") + name);
+        }
+
+        // Frame pacing: the mode's rate (Play wants 240 for input resolution),
+        // halved while a trainer/eval runs and the window is in the background
+        // so the viewer stops competing with it for GPU and CPU time.
+        int wantFps = modes[cur]->targetFps(app);
+        bool background = jobs.anyPythonRunning() && !IsWindowFocused();
+        if (background) wantFps = wantFps < 30 ? wantFps : 30;
+        if (background && !app.livePreview) wantFps = 15;  // nothing animates: panel only
+        if (wantFps != curFps) {
+            SetTargetFPS(wantFps);
+            curFps = wantFps;
         }
 
         if (app.musicLoaded) UpdateMusicStream(app.music);

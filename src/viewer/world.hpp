@@ -70,6 +70,7 @@ struct App {
     bool useTextures = false;   // textures <-> colored shapes
     bool debugMarkers = false;  // show triggers / invisible objects
     bool showHitboxes = false;  // gdcore collision boxes + player box + win line
+    bool livePreview = true;    // Training view polls/draws live.bin; off = UI only, trainer keeps the GPU
     const AtlasFrame* playerFrame1 = nullptr;  // player_01_001.png (primary)
     const AtlasFrame* playerFrame2 = nullptr;  // player_01_2_001.png (secondary)
     const AtlasFrame* shipFrame1 = nullptr;    // ship_01_001.png (primary)

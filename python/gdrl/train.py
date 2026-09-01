@@ -299,6 +299,9 @@ def main():
     last_live = 0.0
     t_start = time.time()
     ticks_window = 0
+    # Rates of the last completed update; what live.bin publishes.
+    last_sps = 0.0
+    last_samples_s = 0.0
 
     # Snapshot-respawn curriculum: bank live states in 500-unit x buckets;
     # dead envs respawn from a random banked state with prob --respawn.
@@ -614,9 +617,11 @@ def main():
                 ticks_window += step_ticks
 
                 if live and time.time() - last_live > 1.0 / 60.0:
-                    sps = ticks_window / max(time.time() - t_start, 1e-9)
-                    live.write(env.get_render_states(), global_ticks, best_x, sps,
-                               total_episodes)
+                    # Publish the last completed update's rates, not a
+                    # mid-rollout running rate: that one excluded
+                    # t_update/t_sil and read ~6x above the log line.
+                    live.write(env.get_render_states(), global_ticks, best_x,
+                               last_sps, total_episodes, last_samples_s)
                     last_live = time.time()
                 t_step3 = time.perf_counter()
                 t_roll_gpu += t_step1 - t_step0
@@ -766,6 +771,7 @@ def main():
 
             t_total = time.perf_counter() - t_upd0
             samples_s = cfg.rollout_steps * env.n_envs / max(t_total, 1e-9)
+            last_sps, last_samples_s = sps, samples_s
             with open(log_path, "a") as f:
                 f.write(row + f",{samples_s:.0f},{t_roll:.3f},{t_update:.3f},"
                               f"{t_sil:.3f},{t_det_wait:.3f},{t_ckpt:.3f},"
@@ -774,6 +780,7 @@ def main():
             print(f"upd {update:4d} | x {mean_x:7.1f} avg {max_x:7.1f} max "
                   f"(best {best_x:7.1f}, {100 * best_x / env.end_x:5.1f}%) | "
                   f"win {win_rate:.2%} | {sps / 1e6:.2f}M ticks/s | "
+                  f"{samples_s / 1e3:.1f}k dec/s | "
                   f"ent {stats['entropy']:.3f}{det_str}{die_str}"
                   f" | {t_roll:.2f}s roll ({t_roll_gpu:.2f} gpu {t_roll_env:.2f} "
                   f"env {t_roll_misc:.2f} misc) {t_update:.2f}s upd"

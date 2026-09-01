@@ -102,7 +102,6 @@ void ReplayMode::restart() {
 }
 
 void ReplayMode::enter(App&) {
-    SetTargetFPS(60);
     if (!ghosts_.empty()) return;  // already loaded; keep replay position
     if (!path_.empty()) {
         if (path_.size() > 5 && path_.compare(path_.size() - 5, 5, ".json") == 0)
@@ -347,7 +346,6 @@ void ReplayMode::drawPanel(App& app) {
 // ------------------------------------------------------------ TrainingViewMode
 
 void TrainingViewMode::enter(App&) {
-    SetTargetFPS(60);
     // No --watch flag: follow the most recently updated run automatically.
     if (path_.empty()) path_ = newestLiveFile();
 }
@@ -359,37 +357,50 @@ void TrainingViewMode::watch(const std::string& livePath) {
 
 bool TrainingViewMode::poll() {
     // live.bin layout: see python/gdrl/live.py. Seqlock: odd seq = write in
-    // progress; keep the previous snapshot and retry next frame.
+    // progress; keep the previous snapshot and retry next frame. The header
+    // is read first: the trainer only publishes during rollouts (~20% of
+    // wall time), so most frames see an unchanged seq and skip the payload
+    // read + decode entirely instead of competing with the trainer for it.
     FILE* f = std::fopen(path_.c_str(), "rb");
     if (!f) return false;
     unsigned char head[40];
-    if (std::fread(head, 1, 40, f) != 40 || rdU32(head) != 0x564C4447u ||
-        rdU32(head + 4) != 1) {
+    if (std::fread(head, 1, 40, f) != 40 || rdU32(head) != 0x564C4447u) {
         std::fclose(f);
         return false;
     }
+    uint32_t version = rdU32(head + 4);  // v1: no samples_s (old runs' files)
     uint32_t seq = rdU32(head + 8);
     uint32_t n = rdU32(head + 12);
-    if (seq % 2 == 1 || n == 0 || n > 65536) {
+    if ((version != 1 && version != 2) || seq % 2 == 1 || n == 0 || n > 65536) {
         std::fclose(f);
         return false;
     }
-    std::vector<unsigned char> rec(n * 20u);
-    size_t got = std::fread(rec.data(), 1, rec.size(), f);
+    if (snap_.valid && seq == snap_.seq) {
+        std::fclose(f);
+        return true;
+    }
+    rec_.resize(n * 20u);
+    size_t got = std::fread(rec_.data(), 1, rec_.size(), f);
+    // Seqlock validation: a write that began during the payload read leaves
+    // seq odd or advanced; the payload is then torn, so keep the previous one.
+    unsigned char seq2[4];
+    bool intact = got == rec_.size() && std::fseek(f, 8, SEEK_SET) == 0 &&
+                  std::fread(seq2, 1, 4, f) == 4 && rdU32(seq2) == seq;
     std::fclose(f);
-    if (got != rec.size()) return false;
+    if (!intact) return false;
 
-    if (seq != snap_.seq) lastSeqChange_ = GetTime();
+    lastSeqChange_ = GetTime();
     snap_.seq = seq;
     std::memcpy(&snap_.globalTicks, head + 16, 8);
     snap_.bestX = rdF32(head + 24);
     snap_.sps = rdF32(head + 28);
     snap_.episodes = rdU32(head + 32);
+    snap_.samplesS = version >= 2 ? rdF32(head + 36) : 0.0f;
     snap_.xyv.resize(n * 3);
     snap_.ship.resize(n);
     snap_.dead.resize(n);
     for (uint32_t i = 0; i < n; ++i) {
-        const unsigned char* p = rec.data() + i * 20;
+        const unsigned char* p = rec_.data() + i * 20;
         snap_.xyv[i * 3 + 0] = rdF32(p);
         snap_.xyv[i * 3 + 1] = rdF32(p + 4);
         snap_.xyv[i * 3 + 2] = rdF32(p + 8);
@@ -404,10 +415,23 @@ bool TrainingViewMode::poll() {
 void TrainingViewMode::update(App& app) {
     if (keyPressed(app, KEY_F)) follow_ = !follow_;
     if (!follow_) freeCamUpdate(app, cam_);
-    if (!path_.empty()) poll();
+    if (!path_.empty() && app.livePreview) poll();
 }
 
 void TrainingViewMode::draw(const App& app) {
+    if (!app.livePreview) {
+        // Preview off: no live.bin polling, no world/ghost rendering, 30 FPS
+        // (15 in the background) so the viewer stops sharing the GPU with
+        // the trainer. Progress still arrives via the Train tab's log scrape.
+        ClearBackground(Color{14, 14, 22, 255});
+        DrawText(TextFormat("Training [%s]   live preview OFF",
+                            std::filesystem::path(path_).parent_path().filename().string().c_str()),
+                 12, 10, 20, RAYWHITE);
+        DrawText("the trainer keeps the GPU; progress is in the Train tab. "
+                 "Re-enable with the 'Live preview' checkbox (Train tab or View tab)",
+                 12, 34, 16, Color{170, 175, 200, 255});
+        return;
+    }
     if (!snap_.valid) {
         drawBackground(app, 0.0f);
         DrawText(path_.empty()
@@ -439,6 +463,14 @@ void TrainingViewMode::draw(const App& app) {
                      GetFrameTime());
     float colorX = follow_ ? leadX : cam_.target.x;
 
+    if (tint_.size() != n) {
+        tint_.resize(n);
+        tintDark_.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            tint_[i] = ghostTint((int)i);
+            tintDark_[i] = ColorBrightness(tint_[i], -0.35f);
+        }
+    }
     drawBackground(app, colorX);
     drawWorld(app, cam_, colorX, [&] {
         gdcore::PlayerState s;
@@ -453,8 +485,7 @@ void TrainingViewMode::draw(const App& app) {
                 drawPlayer(app, s, 0.0f, Color{255, 60, 60, 255},
                            Color{160, 20, 20, 255}, 120);
             } else {
-                drawPlayer(app, s, 0.0f, ghostTint((int)i),
-                           ColorBrightness(ghostTint((int)i), -0.35f), 140);
+                drawPlayer(app, s, 0.0f, tint_[i], tintDark_[i], 140);
             }
         }
     }, leadShip ? 390.0f : 0.0f);
@@ -463,11 +494,12 @@ void TrainingViewMode::draw(const App& app) {
     double gameHours = (double)snap_.globalTicks / 240.0 / 3600.0;
     bool stale = GetTime() - lastSeqChange_ > 5.0;
     DrawText(TextFormat("Training [%s]  %zu envs   alive %d   lead x %.0f   "
-                        "best %.0f (%.1f%%)   ep %u   %.2fM ticks/s   "
+                        "best %.0f (%.1f%%)   ep %u   %.2fM ticks/s   %.1fk dec/s   "
                         "%.1fh game time%s",
                         std::filesystem::path(path_).parent_path().filename().string().c_str(),
                         n, alive, leadX, snap_.bestX, pct, snap_.episodes,
-                        snap_.sps / 1e6, gameHours, stale ? "   [STALE]" : ""),
+                        snap_.sps / 1e6, snap_.samplesS / 1e3, gameHours,
+                        stale ? "   [STALE]" : ""),
              12, 10, 20, RAYWHITE);
     DrawText(TextFormat("live view of the PPO trainer (read-only)   F: %s camera "
                         "(drag/wheel when free)",
@@ -480,7 +512,7 @@ void TrainingViewMode::rescan() {
     lastScan_ = GetTime();
 }
 
-void TrainingViewMode::drawPanel(App&) {
+void TrainingViewMode::drawPanel(App& app) {
     if (lastScan_ < 0 || GetTime() - lastScan_ > 10.0) rescan();
     int sel = -1;
     for (int i = 0; i < (int)lives_.size(); ++i)
@@ -493,6 +525,12 @@ void TrainingViewMode::drawPanel(App&) {
     if (ImGui::Button("Newest")) watch(newestLiveFile());
     ImGui::SameLine();
     ImGui::Checkbox("Follow camera", &follow_);
+    ImGui::SameLine();
+    ImGui::Checkbox("Live preview", &app.livePreview);
+    if (!app.livePreview) {
+        ImGui::TextDisabled("preview off: UI only at 30 FPS (15 unfocused); trainer keeps the GPU");
+        return;
+    }
     if (!snap_.valid) {
         ImGui::TextDisabled("waiting for live.bin data");
         return;
@@ -503,8 +541,8 @@ void TrainingViewMode::drawPanel(App&) {
     bool stale = GetTime() - lastSeqChange_ > 5.0;
     ImGui::Text("%zu envs, %d alive%s", n, alive, stale ? "   [STALE]" : "   [LIVE]");
     ImGui::Text("best x %.0f   episodes %u", snap_.bestX, snap_.episodes);
-    ImGui::Text("%.2fM ticks/s   %.1f h game time", snap_.sps / 1e6,
-                (double)snap_.globalTicks / 240.0 / 3600.0);
+    ImGui::Text("%.2fM ticks/s   %.1fk dec/s   %.1f h game time", snap_.sps / 1e6,
+                snap_.samplesS / 1e3, (double)snap_.globalTicks / 240.0 / 3600.0);
 }
 
 }  // namespace gdv
