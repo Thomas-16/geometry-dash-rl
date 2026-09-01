@@ -464,9 +464,16 @@ def main():
             print(f"restored bank: {sum(len(v) for v in bank.values())} "
                   f"states, deepest {bank_deepest():.0f}; "
                   f"anneal progress {progress0:.2f}")
+        if start_update >= args.updates:
+            raise SystemExit(
+                f"checkpoint is at update {start_update} but --updates is "
+                f"{args.updates}: nothing to do. Pass a larger --updates "
+                f"(the lr/entropy anneal spans updates 0..--updates, so "
+                f"extending a finished run re-opens the schedule).")
         if progress0 >= 0.999:
-            print("WARNING: resumed run's lr/entropy anneal is complete "
-                  "(lr ~= lr_final); pass --lr to keep learning")
+            print(f"note: checkpoint's anneal was complete; re-spanning it "
+                  f"over --updates {args.updates} (progress "
+                  f"{(start_update + 1) / args.updates:.2f} at resume)")
 
     # Startup coverage: run the chained explorer once so the respawn bank
     # spans everything randomly reachable before the first update. Pure
@@ -640,9 +647,10 @@ def main():
             sync()
             t_roll = time.perf_counter() - t_upd0
 
-            # Anneal position continues across resumes (progress0 from the ckpt).
-            progress = progress0 + (1.0 - progress0) * (
-                update + 1 - start_update) / max(args.updates - start_update, 1)
+            # Anneal position is absolute: update k of --updates, also across
+            # resumes. (The old progress0 + (1-progress0)*... continuation
+            # pinned lr at lr_final=0 forever when resuming a finished run.)
+            progress = (update + 1) / args.updates
             t0 = time.perf_counter()
             if polish:
                 lr_now = min(cfg.lr + (cfg.lr_final - cfg.lr) * progress,
