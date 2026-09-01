@@ -7,6 +7,12 @@
 //                                inclusive), print death/win tick and x
 //   env_check det                two identical pseudo-random runs must give
 //                                bytewise-identical obs/reward streams
+//   env_check trace <spec> [x0 [x1]]
+//                                like run, but print per-tick state while
+//                                x is inside [x0, x1] (default: everything)
+//
+// The level comes from GD_LEVEL_PATH (default Stereo Madness); Back On
+// Track is <install>/Resources/levels/2.txt.
 #include "core/level.hpp"
 #include "core/physics.hpp"
 #include "env/episode.hpp"
@@ -85,9 +91,12 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (cmd == "run") {
+    if (cmd == "run" || cmd == "trace") {
         // parse "a-b,c-d,..." inclusive tick ranges into per-tick holds
         std::vector<std::pair<int, int>> ranges;
+        const bool trace = cmd == "trace";
+        float x0 = argc > 3 ? std::strtof(argv[3], nullptr) : -1e9f;
+        float x1 = argc > 4 ? std::strtof(argv[4], nullptr) : 1e9f;
         if (argc > 2) {
             const char* p = argv[2];
             while (*p) {
@@ -105,6 +114,13 @@ int main(int argc, char** argv) {
             for (auto& r : ranges)
                 if (tick >= r.first && tick <= r.second) hold = true;
             gdcore::step(s, cfg, geom, hold);
+            if (trace && s.x >= x0 && s.x <= x1)
+                std::printf("t=%5d x=%9.3f y=%9.4f yvel=%8.3f%s%s%s%s\n",
+                            tick + 1, s.x, s.y, s.yvel,
+                            s.onGround ? " ground" : "",
+                            s.ship ? " ship" : "",
+                            s.upsideDown ? " FLIPPED" : "",
+                            s.dead ? " DEAD" : "");
             if (s.dead || s.x >= endX) {
                 std::printf("%s at tick %d, x=%.2f (%.1f%%)\n",
                             s.dead ? "DEATH" : "WIN", tick + 1, s.x,

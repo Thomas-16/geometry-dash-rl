@@ -363,6 +363,18 @@ void drawHitboxes(const App& app, const Camera2D& cam) {
         Color c = p.toShip ? Color{240, 120, 220, 255} : Color{110, 240, 110, 255};
         DrawRectangleLinesEx(r, lw, c);
     }
+    for (const auto& sp : app.geom.specials) {
+        Rectangle r = rect(sp.box);
+        Color c{};
+        switch (sp.kind) {
+            case gdcore::SpecialKind::YellowPad: c = Color{255, 230, 60, 255}; break;
+            case gdcore::SpecialKind::GravityPad: c = Color{90, 170, 255, 255}; break;
+            case gdcore::SpecialKind::GravityNormal: c = Color{90, 170, 255, 255}; break;
+            case gdcore::SpecialKind::GravityFlip: c = Color{255, 230, 60, 255}; break;
+        }
+        DrawRectangleRec(r, Color{c.r, c.g, c.b, 60});
+        DrawRectangleLinesEx(r, lw, c);
+    }
     // Win line: physics ends at last object + 40 (PlayMode / env_check / gdenv).
     float wx = app.maxX + 40.0f;
     DrawLineEx({wx, -400.0f}, {wx, 90.0f}, 2.0f / cam.zoom, Color{255, 230, 80, 220});
@@ -465,6 +477,9 @@ void drawPlayer(const App& app, const gdcore::PlayerState& s, float rotationDeg,
     };
     Color pri = fade(primary), sec = fade(secondary);
     Vector2 c{s.x, -(s.y - 90.0f)};
+    // Upside-down cube: the game mirrors the icon vertically; a half-turn is
+    // the same picture for the symmetric default cube (presentation only).
+    if (s.upsideDown && !s.ship) rotationDeg += 180.0f;
     if (app.useTextures && s.ship && app.shipFrame1) {
         // Ship: the cube rides inside at 0.55 scale, 5 units above center
         // (PlayerObject::createShip), then the ship hull draws over it. Both

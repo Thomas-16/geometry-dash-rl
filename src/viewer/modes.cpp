@@ -279,7 +279,8 @@ void PlayMode::drawPanel(App& app) {
     ImGui::Text("attempt %d   x %.1f (%.1f%%)   tick %lld", attempt_, player_.x,
                 progress * 100.0f, tick_);
     ImGui::Text("y %.2f  yvel %.3f  %s%s%s", player_.y, player_.yvel,
-                player_.ship ? "ship" : "cube", player_.onGround ? "  ground" : "",
+                player_.ship ? "ship" : (player_.upsideDown ? "cube (flipped)" : "cube"),
+                player_.onGround ? "  ground" : "",
                 player_.dead ? "  DEAD" : "");
     if (ImGui::Button("Restart")) { attempt_ = 1; won_ = false; setPaused(app, false); resetAttempt(app); }
     ImGui::SameLine();

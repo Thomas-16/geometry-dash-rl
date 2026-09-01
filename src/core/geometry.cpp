@@ -2,17 +2,27 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace gdcore {
 
 namespace {
 
-// Hitbox sizes read out of the running game (GameObject::getObjectRect via
-// the trace-logger mod, GD 2.2081). Covers the Stereo Madness object set;
-// everything not listed is decoration/portal/trigger with no cube collision.
+// Hitbox sizes as the engine builds them (GD 2.2081): GameObject::commonSetup
+// takes m_width/m_height from the sprite's content size and
+// GameObject::customSetup (base+0x190e20) overrides a per-id rect scale for
+// hazards (spike 8: 0.2 x 0.4 of 30x30 = 6x12; pit 9: 0.3 x 0.4 of 30x27).
+// Solids, portals and pads keep scale 1.0. The Stereo Madness rows were read
+// back from the running game (trace-logger objects.csv); the Back On Track
+// rows (35, 67, 10) from the session7 dump of level 2 (pads = their atlas
+// frame size, bump_01 25x4 / gravbump_01 25x6).
+//
+// Gravity portal (10/11): 25x75 as the engine reports it (session7
+// objects.csv: rw,rh 75x25 for the -90-degree portal at x 10455).
 struct HitboxSpec {
     int id;
-    char kind; // 's' solid, 'h' hazard
+    char kind; // 's' solid, 'h' hazard, 'p' yellow pad, 'g' gravity pad,
+               // 'n' normal-gravity portal, 'f' flip-gravity portal
     float w, h;
 };
 
@@ -22,12 +32,30 @@ constexpr HitboxSpec kHitboxes[] = {
     {40, 's', 30.0f, 14.0f}, {62, 's', 30.0f, 16.0f}, {65, 's', 30.0f, 16.0f},
     {8, 'h', 6.0f, 12.0f},   {9, 'h', 9.0f, 10.8f},  {39, 'h', 6.0f, 5.6f},
     {103, 'h', 4.0f, 7.6f},
+    {35, 'p', 25.0f, 4.0f},  {67, 'g', 25.0f, 6.0f},
+    {10, 'n', 25.0f, 75.0f}, {11, 'f', 25.0f, 75.0f},
 };
 
 const HitboxSpec* findSpec(int id) {
     for (const auto& s : kHitboxes)
         if (s.id == id) return &s;
     return nullptr;
+}
+
+// GameObject helper at win 2.2081 base+0x1a1910 (used by the gravity-pad
+// case of collisionCheckObjects): rotation truncated to int; non-multiples
+// of 90 count as flipped in (90, 270) / (-270, -90); multiples of 90 count
+// as flipped only at +-180; flipY inverts the answer.
+bool padIsFlipped(const gd::Object& obj) {
+    int rot = static_cast<int>(obj.rotation); // cvttss2si: truncation
+    bool f;
+    if (rot % 90 != 0) {
+        f = (rot >= 91 && rot <= 269) || (rot >= -269 && rot <= -91);
+        return obj.flipY ? !f : f;
+    }
+    int a = std::abs(rot);
+    if (obj.flipY) return a != 180;
+    return a == 180;
 }
 
 } // namespace
@@ -49,14 +77,36 @@ LevelGeometry LevelGeometry::build(const gd::Level& level) {
         float cy = obj.y + 90.0f; // level -> engine y
         Box b{cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f,
               order};
-        if (portal) g.portals.push_back(Portal{b, obj.id == 13});
-        else (spec->kind == 's' ? g.solids : g.hazards).push_back(b);
+        if (portal) {
+            g.portals.push_back(Portal{b, obj.id == 13});
+            continue;
+        }
+        switch (spec->kind) {
+            case 's': g.solids.push_back(b); break;
+            case 'h': g.hazards.push_back(b); break;
+            case 'p':
+                g.specials.push_back(
+                    Special{b, SpecialKind::YellowPad, padIsFlipped(obj)});
+                break;
+            case 'g':
+                g.specials.push_back(
+                    Special{b, SpecialKind::GravityPad, padIsFlipped(obj)});
+                break;
+            case 'n':
+                g.specials.push_back(Special{b, SpecialKind::GravityNormal, false});
+                break;
+            case 'f':
+                g.specials.push_back(Special{b, SpecialKind::GravityFlip, false});
+                break;
+        }
     }
     auto byLeft = [](const Box& a, const Box& b) { return a.left < b.left; };
     std::sort(g.solids.begin(), g.solids.end(), byLeft);
     std::sort(g.hazards.begin(), g.hazards.end(), byLeft);
     std::sort(g.portals.begin(), g.portals.end(),
               [](const Portal& a, const Portal& b) { return a.box.left < b.box.left; });
+    std::sort(g.specials.begin(), g.specials.end(),
+              [](const Special& a, const Special& b) { return a.box.left < b.box.left; });
     return g;
 }
 

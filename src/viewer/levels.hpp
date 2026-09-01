@@ -1,8 +1,9 @@
 // Official level table (GD 2.2 main levels): id -> display name, song stem
 // under <Resources>/<song>.mp3, and whether the replica sim is verified for it.
-// Only Stereo Madness has an engine-extracted hitbox table (core/geometry.cpp)
-// and trace-verified physics; every other entry renders but its sim is
-// unverified, which the GUI labels loudly.
+// Stereo Madness and Back On Track have engine-extracted hitbox tables
+// (core/geometry.cpp) and trace-verified physics (traces/session2-7,
+// including full completions of both); every other entry renders but its
+// sim is unverified, which the GUI labels loudly.
 #pragma once
 
 #include <cstddef>
@@ -18,7 +19,7 @@ struct LevelInfo {
 
 inline constexpr LevelInfo kLevels[] = {
     {1, "Stereo Madness", "StereoMadness", true},
-    {2, "Back On Track", "BackOnTrack", false},
+    {2, "Back On Track", "BackOnTrack", true},
     {3, "Polargeist", "Polargeist", false},
     {4, "Dry Out", "DryOut", false},
     {5, "Base After Base", "BaseAfterBase", false},

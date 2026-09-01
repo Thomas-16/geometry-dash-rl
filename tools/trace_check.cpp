@@ -9,7 +9,8 @@
 // also die on exactly the tick the real game died.
 //
 // Level geometry comes from the real install at runtime (never committed);
-// override the level path with the GD_LEVEL_PATH environment variable.
+// override the level path with the GD_LEVEL_PATH environment variable
+// (Back On Track: GD_LEVEL_PATH=<install>/Resources/levels/2.txt).
 
 #include "core/geometry.hpp"
 #include "core/level.hpp"
@@ -31,7 +32,7 @@ constexpr const char* kDefaultLevel =
 struct Row {
     uint64_t tick;
     double yvel;
-    int holding, onground, ship, dead;
+    int holding, onground, upsidedown, ship, dead;
     float realx, realy;
 };
 
@@ -59,8 +60,8 @@ std::vector<Row> loadTrace(const char* path) {
             &ship, &dead, &speed, &dt, &halftick, &lasttick, &nodex, &realx,
             &realy, &totaltime);
         if (n != 18 || src != 0) continue;
-        rows.push_back(Row{tick, yvel, holding, onground, ship, dead,
-                           (float)realx, (float)realy});
+        rows.push_back(Row{tick, yvel, holding, onground, upsidedown, ship,
+                           dead, (float)realx, (float)realy});
     }
     std::fclose(f);
     return rows;
@@ -82,6 +83,7 @@ int checkTrace(const char* path, const gdcore::LevelGeometry& geom,
     s.onGround = rows[0].onground != 0;
     s.holding = rows[0].holding != 0;
     s.ship = rows[0].ship != 0;
+    s.upsideDown = rows[0].upsidedown != 0;
 
     uint64_t matched = 0;
     for (size_t i = 1; i < rows.size(); ++i) {
@@ -106,6 +108,14 @@ int checkTrace(const char* path, const gdcore::LevelGeometry& geom,
                 "sim ship=%d real ship=%d (x=%.9g y=%.9g)\n",
                 path, (unsigned long long)r.tick, (unsigned long long)matched,
                 (int)s.ship, r.ship, s.x, s.y);
+            return 1;
+        }
+        if (s.upsideDown != (r.upsidedown != 0)) {
+            std::printf(
+                "%s: GRAVITY MISMATCH at tick %llu after %llu matched ticks: "
+                "sim upsidedown=%d real upsidedown=%d (x=%.9g y=%.9g)\n",
+                path, (unsigned long long)r.tick, (unsigned long long)matched,
+                (int)s.upsideDown, r.upsidedown, s.x, s.y);
             return 1;
         }
         if (s.x != r.realx || s.y != r.realy) {

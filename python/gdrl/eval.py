@@ -19,7 +19,8 @@ import numpy as np
 import torch
 
 from .env import GdVecEnv
-from .model import AMP_MODES, autocast_ctx, configure_backend, make_model
+from .model import (AMP_MODES, autocast_ctx, configure_backend, load_model_state,
+                    make_model)
 from . import traces
 
 
@@ -69,7 +70,8 @@ def main():
     arch = ckpt.get("config", {}).get("arch", "mlp")
     model = make_model(env.obs_dim, arch,
                        ckpt.get("logit_bound", 4.0)).to(device)
-    model.load_state_dict(ckpt["model"])
+    for note in load_model_state(model, ckpt["model"]):
+        print(f"checkpoint obs migration: {note}")
     model.eval()
 
     obs = torch.as_tensor(env.reset(), device=device)

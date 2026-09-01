@@ -189,6 +189,45 @@ class ConvActorCritic(_ActorCriticBase):
         self.to(memory_format=torch.channels_last)
 
 
+def load_model_state(model: _ActorCriticBase, state: dict,
+                     strict: bool = True) -> list[str]:
+    """load_state_dict that tolerates an *appended* observation block.
+
+    obs.hpp only ever appends scalars (v2 -> v3 added the gravity flag and
+    the next-special features), so a checkpoint trained on a shorter obs is
+    still meaningful: the first input layer's weight matrix is widened with
+    zero columns for the new scalars, which reproduces the old policy
+    exactly on any state where the new features were absent. Grid columns
+    keep their positions because the grid follows the scalar block: the
+    checkpoint's (rows, cols) are re-laid out over the new scalar_dim.
+    Returns a list of human-readable notes about what was widened."""
+    notes: list[str] = []
+    own = model.state_dict()
+    fixed = dict(state)
+    for key, w in own.items():
+        old = fixed.get(key)
+        if old is None or old.shape == w.shape or old.dim() != 2 or w.dim() != 2:
+            continue
+        if old.shape[0] != w.shape[0] or old.shape[1] >= w.shape[1]:
+            continue
+        pad = w.shape[1] - old.shape[1]
+        widened = torch.zeros_like(w)
+        # scalar-branch layer (conv arch): plain prefix copy
+        # flat-MLP first layer: scalars are a prefix, the grid a suffix
+        grid = GRID_DIM if old.shape[1] > GRID_DIM else 0
+        if grid:
+            s_old = old.shape[1] - grid
+            widened[:, :s_old] = old[:, :s_old]
+            widened[:, s_old + pad:] = old[:, s_old:]
+        else:
+            widened[:, :old.shape[1]] = old
+        fixed[key] = widened.to(old.dtype)
+        notes.append(f"{key}: widened input {old.shape[1]} -> {w.shape[1]} "
+                     f"(+{pad} zero columns for appended obs scalars)")
+    model.load_state_dict(fixed, strict=strict)
+    return notes
+
+
 def make_model(obs_dim: int, arch: str = "cnn",
                logit_bound: float = 4.0) -> _ActorCriticBase:
     if arch == "cnn":

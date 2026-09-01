@@ -1,4 +1,5 @@
-// Object-id -> sprite-frame table for the Stereo Madness object set.
+// Object-id -> sprite-frame table for the Stereo Madness + Back On Track
+// object sets.
 // Presentation-only viewer data (like the old shape table); NOT hitbox or
 // collision truth. Mapping cross-checked against OpenGD's GameObject table
 // and verified against the GJ_GameSheet-uhd / GJ_GameSheet02-uhd atlases.
@@ -37,6 +38,12 @@ inline const RenderSpec* renderSpec(int id) {
         {9, {"pit_01_001.png"}, 2, Tint::Black},
         {12, {"portal_03_back_001.png", "portal_03_front_001.png"}, 3, Tint::Obj},
         {13, {"portal_04_back_001.png", "portal_04_front_001.png"}, 3, Tint::Obj},
+        // Back On Track: gravity portals (10 blue = normal, 11 yellow = flip),
+        // yellow jump pad, blue gravity pad
+        {10, {"portal_01_back_001.png", "portal_01_front_001.png"}, 3, Tint::Obj},
+        {11, {"portal_02_back_001.png", "portal_02_front_001.png"}, 3, Tint::Obj},
+        {35, {"bump_01_001.png"}, 2, Tint::Obj},
+        {67, {"gravbump_01_001.png"}, 2, Tint::Obj},
         {142, {"secretCoin_01_001.png"}, 3, Tint::Obj},
         {15, {"rod_01_001.png"}, -1, Tint::Obj},
         {16, {"rod_02_001.png"}, -1, Tint::Obj},

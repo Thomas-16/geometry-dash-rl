@@ -2,6 +2,7 @@
 
 #include "core/level.hpp"
 
+#include <cstdint>
 #include <vector>
 
 namespace gdcore {
@@ -29,10 +30,35 @@ struct Portal {
     bool toShip;
 };
 
+// Activatable objects handled inside GJBaseGameLayer::collisionCheckObjects
+// (win 2.2081 base+0x214960): they act immediately when the player's 30x30
+// rect overlaps their rect (touch-inclusive), in object order, BEFORE the
+// tick's solid resolution and hazard deaths. Pads are one-shot per attempt
+// (GameObject::activatedByPlayer / hasBeenActivatedByPlayer gate the loop);
+// gravity portals are idempotent (GJBaseGameLayer::flipGravity is a no-op
+// when the player already has the requested gravity).
+enum class SpecialKind : uint8_t {
+    YellowPad,      // id 35, type 8: propellPlayer(bumpMod 1.0) -> |yvel| 16
+    GravityPad,     // id 67, type 10: propellPlayer(0.8) -> 12.8, then flip
+    GravityNormal,  // id 10, type 4: flipGravity(false)
+    GravityFlip,    // id 11, type 3: flipGravity(true)
+};
+
+struct Special {
+    Box box;
+    SpecialKind kind;
+    // Pad orientation as GameObject's "is upside-down pad" helper computes it
+    // (base+0x1a1910): rotation in (90,270) or exactly 180, XOR flipY. A
+    // gravity pad sends the player to gravity = !flipped; yellow pads ignore
+    // it (propellPlayer only looks at the player's gravity).
+    bool flipped;
+};
+
 struct LevelGeometry {
-    std::vector<Box> solids;    // sorted by left
-    std::vector<Box> hazards;   // sorted by left
-    std::vector<Portal> portals; // sorted by left
+    std::vector<Box> solids;      // sorted by left
+    std::vector<Box> hazards;     // sorted by left
+    std::vector<Portal> portals;  // mode portals, sorted by left
+    std::vector<Special> specials;  // pads + gravity portals, sorted by left
 
     static LevelGeometry build(const gd::Level& level);
 };

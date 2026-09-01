@@ -30,11 +30,15 @@ constexpr float kGridYBase = 90.0f;
 constexpr float kLookahead = kGridCols * kCellW; // 480
 constexpr int kGridDim = kGridRows * kGridCols;  // per channel
 // Obs v2: scalars 12-17 appended (overhead solid, second hazard, dx,
-// reserved). Scalars 0-11 and the grid layout are frozen — additions bump
-// kObsVersion and only ever append. gdenv_obs_version() exposes this so the
-// Python side can refuse a stale DLL.
-constexpr int kObsVersion = 2;
-constexpr int kPlayerDim = 18;
+// reserved). Obs v3 (Back On Track): scalar 17 becomes the gravity flag
+// (it was the reserved mode slot, always 0 before) and scalars 18-23 are
+// appended — the next two activatable objects ahead (pads / gravity
+// portals): distance, dy, kind. Scalars 0-16 and the grid layout are
+// frozen — additions bump kObsVersion and only ever append.
+// gdenv_obs_version() exposes this so the Python side can refuse a stale
+// DLL.
+constexpr int kObsVersion = 3;
+constexpr int kPlayerDim = 24;
 constexpr int kObsDim = kPlayerDim + 2 * kGridDim;
 
 namespace detail {
@@ -173,8 +177,40 @@ inline void buildObs(const gdcore::PlayerState& s,
     // Speed as a feature: constant while every level runs at one dx, but the
     // slot means speed portals later change an input, not the network.
     out[16] = dx / 2.0f;
-    out[17] = 0.0f; // reserved (future mode flag) — keeps the next obs
-                    // version from being a dim break
+    // Gravity flag (obs v3; 0 in every level without gravity objects).
+    out[17] = s.upsideDown ? 1.0f : 0.0f;
+    // Next two activatable objects ahead (obs v3): pads relaunch the player
+    // and gravity objects invert every vertical rule, so the policy needs
+    // them as sharply as it needs hazards. dist = left edge from the player
+    // (0 while overlapping), dy = box bottom relative to the player, kind:
+    // yellow pad +1, gravity pad -1, normal-gravity portal +0.5,
+    // flip-gravity portal -0.5. Already-activated pads are still reported
+    // (the featurizer has no activation state); they sit behind or under
+    // the player only briefly.
+    {
+        float sd[2] = {1.0f, 1.0f}, sy[2] = {0.0f, 0.0f}, sk[2] = {0.0f, 0.0f};
+        auto sit = std::lower_bound(
+            g.specials.begin(), g.specials.end(), s.x - 15.0f,
+            [](const gdcore::Special& e, float v) { return e.box.left < v; });
+        for (int k = 0; k < 2 && sit != g.specials.end() &&
+                        sit->box.left - s.x < kLookahead;
+             ++k, ++sit) {
+            sd[k] = std::max(0.0f, sit->box.left - s.x) / kLookahead;
+            sy[k] = (sit->box.bottom - s.y) / 300.0f;
+            switch (sit->kind) {
+                case gdcore::SpecialKind::YellowPad: sk[k] = 1.0f; break;
+                case gdcore::SpecialKind::GravityPad: sk[k] = -1.0f; break;
+                case gdcore::SpecialKind::GravityNormal: sk[k] = 0.5f; break;
+                case gdcore::SpecialKind::GravityFlip: sk[k] = -0.5f; break;
+            }
+        }
+        out[18] = sd[0];
+        out[19] = sy[0];
+        out[20] = sk[0];
+        out[21] = sd[1];
+        out[22] = sy[1];
+        out[23] = sk[1];
+    }
 
     float* grid = out + kPlayerDim;
     std::memset(grid, 0, sizeof(float) * 2 * kGridDim);

@@ -34,7 +34,19 @@ cmake -S . -B build -G Ninja && cmake --build build
 - GD install: `S:\SteamLibrary\steamapps\common\Geometry Dash\`
 - Official levels: `Resources\levels\<id>.txt` (Stereo Madness = `1.txt`), URL-safe base64 of gzip. The `LevelData.plist` method described in older docs/notes is obsolete as of GD 2.2.
 - **Never commit level data or any extracted game assets** — they're RobTop's content. Always read from the install at runtime.
-- Smoke test: `./build/dump.exe` must report 2291 objects / 31 distinct ids for Stereo Madness.
+- Smoke test: `./build/dump.exe` must report 2291 objects / 31 distinct ids for Stereo Madness; `./build/dump.exe <install>/Resources/levels/2.txt` 1545 objects / 26 ids for Back On Track.
+- Tools take the level from `GD_LEVEL_PATH` (default `levels/1.txt`); the trainer/eval take `--level <path>` and record `level_id` from the file stem.
+
+## Back On Track (level 2) mechanics
+
+Implemented from the 2.2081 disassembly (`GJBaseGameLayer::collisionCheckObjects` 0x214960, `bumpPlayer` 0x2179d0, `PlayerObject::propellPlayer` 0x39f850, `flipGravity` 0x39a1d0, `updateJump` 0x38b900, `collidedWithObjectInternal` 0x391a70) and **trace-verified bit-exact** (`traces/session7`, 6 attempts incl. a full completion of 19,269 gameplay ticks; hitboxes from `traces/session7/objects.csv`). Regression: `GD_LEVEL_PATH=<levels/2.txt> build/trace_check.exe traces/session7/attempt_*.csv` (it also checks the `upsidedown` column) — run it together with the SM traces after touching the sim.
+
+- New ids vs SM: **35 yellow pad** (25x4, `propellPlayer(1.0)` → yvel = ±16 along the current gravity), **67 blue gravity pad** (25x6, yvel = ±12.8 then `flipGravity` → yvel halved raw → 6.4, upside down), **10 blue gravity portal** (25x75, back to normal gravity, yvel halved). Id 5 is type 7 (decoration, no collision) — engine-confirmed. Hitbox = sprite frame size × per-id scale from `customSetup` (spike 0.2×0.4); pads have no scale.
+- Tick order is now the real one (`gdcore::step`): movement → floor/band snap → **specials (pads, gravity portals, mode portals) act immediately** → solids (with the new mode's rules) → hazards → input. Pads are one-shot (`PlayerState::specialCursor/specialDone` rolling window).
+- **Cube gravity is `f64(f32(0.225f*0.96f)) = 0.2159999907`, not `f32(0.216)`** — the ulp only decides 3-decimal rounding ties, which appear after a mode portal halves an odd-thousandth yvel raw (session7 attempt_0002 tick 12894). Keep the expression, not a literal.
+- Upside-down cube: gravity/jump/fall-clamp signs flip, "landing" is on an object's bottom face (`y = bottom − 15`), there is **no ceiling** for the classic cube (it rises until it meets a solid), and neither cube orientation has a head hit against static solids (session4 tick 5789: the cube rises 0.11 into a block bottom and keeps going). The landing-pattern x snap negates its y offsets when flipped. Ship + upside down is not modeled (no level in scope).
+- The flipped section (x 10282–10600) plays out with zero input: slab → gravity pad → rise to the ceiling portal at y≈411 → fall onto the block column → yellow pad over the six spikes. `env_check trace <spec> 10200 10900` prints it.
+- Obs v3 (`kObsVersion` 3, `kPlayerDim` 24): scalar 17 = gravity flag, 18–23 = next two specials (dist, dy, kind ±1 pad / ±0.5 gravity portal). Grid channels unchanged. `model.load_model_state` zero-pads older checkpoints' first input layer (v2 SM checkpoints still win deterministically); the optimizer state is reset on migration.
 
 ## Architecture rules
 
@@ -44,7 +56,7 @@ cmake -S . -B build -G Ninja && cmake --build build
 
 ## RL env contract (src/env + python/gdrl)
 
-- **Observation versioning** (`src/env/obs.hpp`): the scalar block and grid layout are frozen; changes are additive-only and bump `kObsVersion` (checked by `python/gdrl/env.py` at DLL load). Scalar `[17]` is reserved as the future mode flag; changing the grid y-band is an obs v3 decision. `obs.hpp` will be `#include`d verbatim by the Geode mod — compile-time constants only, no runtime normalization.
+- **Observation versioning** (`src/env/obs.hpp`): the scalar block and grid layout are frozen; changes are additive-only and bump `kObsVersion` (checked by `python/gdrl/env.py` at DLL load; `model.load_model_state` migrates older checkpoints by zero-padding the appended scalars). v3 = scalars 0–23 (17 gravity flag, 18–23 next two pads/gravity portals); changing the grid y-band is an obs v4 decision. `obs.hpp` will be `#include`d verbatim by the Geode mod — compile-time constants only, no runtime normalization.
 - **Speed portals later change an input, not the network**: per-tick `dx` is already an obs scalar and a `buildObs` parameter.
 - **Env stepping is parallel and bit-deterministic**: `$GDENV_THREADS` total threads (1 = exact serial fallback), default `hardware_concurrency()-1`. After touching the env layer, run `./build/env_check det` AND `python -m gdrl.selftest` (from `python/`; serial-vs-threaded byte-identity).
 - **Regression bar for RL changes**: a default `python -m gdrl.train` run must still beat Stereo Madness (deterministic `det ... WIN` line / `wins.gdtrace`), and `python -m gdrl.eval runs/<name>/ckpt_best_det.pt` must write a `solution.json`. Don't shrink `--updates` for the check — it compresses the lr/entropy anneal and changes the learning trajectory.

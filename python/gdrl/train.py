@@ -22,6 +22,7 @@ import torch
 from .env import GdVecEnv
 from .live import LiveWriter
 from .model import (AMP_MODES, GraphedAct, autocast_ctx, configure_backend,
+                    load_model_state,
                     make_model, maybe_compile)
 from .ppo import PPO, PPOConfig, RolloutBuffer
 from . import sil
@@ -243,8 +244,14 @@ def main():
     total_episodes = 0
     polish = False
     if ckpt is not None:
-        model.load_state_dict(ckpt["model"])
-        algo.optimizer.load_state_dict(ckpt["optimizer"])
+        migrated = load_model_state(model, ckpt["model"])
+        for note in migrated:
+            print(f"checkpoint obs migration: {note}")
+        if migrated:
+            # optimizer moments have the old shapes; start them fresh
+            print("checkpoint obs migration: optimizer state reset")
+        else:
+            algo.optimizer.load_state_dict(ckpt["optimizer"])
         start_update = ckpt["update"]
         best_x = ckpt.get("best_x", 0.0)
         best_mean_x = ckpt.get("best_mean_x", 0.0)
