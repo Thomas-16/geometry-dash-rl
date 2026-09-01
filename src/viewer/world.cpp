@@ -34,7 +34,8 @@ Shape classify(int id) {
         case 29: case 30:
             return Shape::Trigger;
         case 15: case 16: case 17: case 18: case 19: case 20: case 21:
-        case 22: case 23: case 27: case 40: case 41: case 54: case 62: case 65:
+        case 22: case 23: case 26: case 27: case 40: case 41: case 54: case 62:
+        case 65: case 68:
             return Shape::Deco;
         default:
             return Shape::Unknown;

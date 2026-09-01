@@ -10,7 +10,8 @@
 //
 // Level geometry comes from the real install at runtime (never committed);
 // override the level path with the GD_LEVEL_PATH environment variable
-// (Back On Track: GD_LEVEL_PATH=<install>/Resources/levels/2.txt).
+// (Back On Track: GD_LEVEL_PATH=<install>/Resources/levels/2.txt; levels
+// 3-5 likewise by file stem).
 
 #include "core/geometry.hpp"
 #include "core/level.hpp"

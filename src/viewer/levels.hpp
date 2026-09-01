@@ -4,8 +4,10 @@
 // (core/geometry.cpp) and trace-verified physics (traces/session2-7,
 // including full completions of both); Polargeist's jump rings are
 // trace-verified too (traces/session8, 39 orb activations, 75% of the
-// level). Every other entry renders but its sim is unverified, which the
-// GUI labels loudly.
+// level). Dry Out and Base After Base add only the slab id 68 and reachable
+// flip portals; traces/session9 (Dry Out to 93%) and traces/session10 (a
+// full Base After Base completion) match bit-exactly. Every other entry
+// renders but its sim is unverified, which the GUI labels loudly.
 #pragma once
 
 #include <cstddef>
@@ -23,8 +25,8 @@ inline constexpr LevelInfo kLevels[] = {
     {1, "Stereo Madness", "StereoMadness", true},
     {2, "Back On Track", "BackOnTrack", true},
     {3, "Polargeist", "Polargeist", true},
-    {4, "Dry Out", "DryOut", false},
-    {5, "Base After Base", "BaseAfterBase", false},
+    {4, "Dry Out", "DryOut", true},
+    {5, "Base After Base", "BaseAfterBase", true},
     {6, "Can't Let Go", "CantLetGo", false},
     {7, "Jumper", "Jumper", false},
     {8, "Time Machine", "TimeMachine", false},

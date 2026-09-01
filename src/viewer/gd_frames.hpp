@@ -1,5 +1,5 @@
-// Object-id -> sprite-frame table for the Stereo Madness, Back On Track and
-// Polargeist object sets.
+// Object-id -> sprite-frame table for the Stereo Madness, Back On Track,
+// Polargeist, Dry Out and Base After Base object sets.
 // Presentation-only viewer data (like the old shape table); NOT hitbox or
 // collision truth. Mapping cross-checked against OpenGD's GameObject table
 // and verified against the GJ_GameSheet-uhd / GJ_GameSheet02-uhd atlases.
@@ -60,8 +60,10 @@ inline const RenderSpec* renderSpec(int id) {
         {54, {"d_ball_05_001.png"}, -1, Tint::Glow},
         {62, {"square_b_01_001.png"}, -2, Tint::Black},
         {65, {"square_b_04_001.png"}, -2, Tint::Black},
+        {68, {"square_b_06_001.png"}, -2, Tint::Black},  // Dry Out slab step
         {22, {}, 99, Tint::Obj},  // enter-effect: none (invisible)
         {23, {}, 99, Tint::Obj},  // enter-effect: fade
+        {26, {}, 99, Tint::Obj},  // enter-effect: from right (Base After Base)
         {27, {}, 99, Tint::Obj},  // enter-effect: scale up
         {29, {}, 99, Tint::Obj},  // BG color trigger
         {30, {}, 99, Tint::Obj},  // ground color trigger

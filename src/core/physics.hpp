@@ -10,7 +10,9 @@ namespace gdcore {
 
 // Per-tick cube physics at 240 TPS, derived empirically from real-game traces
 // (see traces/ and tools/). All constants are for the 0.9x ("normal") speed
-// that Stereo Madness and Back On Track use throughout.
+// that the first five official levels use throughout (Dry Out / Base After
+// Base add nothing beyond the slab id 68 and reachable flip portals — see
+// geometry.cpp).
 //
 // Verified bit-exact against traces at float32 position level. The game's
 // internal per-tick order is:

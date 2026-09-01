@@ -52,6 +52,9 @@ target_link_libraries(dump PRIVATE gdcore)
 add_executable(trace_check tools/trace_check.cpp)
 target_link_libraries(trace_check PRIVATE gdcore)
 
+add_executable(solve tools/solve.cpp)
+target_link_libraries(solve PRIVATE gdcore)
+
 # Viewer GUI deps (Dear ImGui + rlImGui backend + nlohmann/json), fetched at
 # configure time into build/_deps. Pins: rlImGui tag Raylib_5_5 (main targets
 # raylib 6.0 and calls GetDisplayScale, absent in 5.5) which needs ImGui >= 1.92

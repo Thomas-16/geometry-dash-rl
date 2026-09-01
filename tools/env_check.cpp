@@ -12,7 +12,8 @@
 //                                x is inside [x0, x1] (default: everything)
 //
 // The level comes from GD_LEVEL_PATH (default Stereo Madness); Back On
-// Track is <install>/Resources/levels/2.txt, Polargeist 3.txt.
+// Track is <install>/Resources/levels/2.txt, Polargeist 3.txt, Dry Out
+// 4.txt, Base After Base 5.txt.
 #include "core/level.hpp"
 #include "core/physics.hpp"
 #include "env/episode.hpp"

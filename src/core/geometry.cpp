@@ -25,6 +25,14 @@ namespace {
 // the 30x30 ring_01 frame -> 36x36, no circle radius (+0x38c stays 0), so
 // contact is the same touch-inclusive CCRect test as every other special.
 // Disassembly-derived; confirm against the level-3 objects.csv dump.
+//
+// Slab id 68 (Dry Out, square_b_06): customSetup dispatches ids 40/62/65/68
+// to the same case (byte index table 0x194b44 -> case 153 at 0x140193d0f,
+// the plain-solid path with no rect scale), so its hitbox is the atlas
+// frame's content size: square_b_06_001 is 30x16 in GJ_GameSheet.plist,
+// exactly like 62/65 (square_b_01/04); traces/session9/objects.csv confirms
+// type 0, 30x16. Ids 22/26/32/33 share case 9 (0x140193ce1): enter-effect
+// / trail triggers, no collision.
 struct HitboxSpec {
     int id;
     char kind; // 's' solid, 'h' hazard, 'p' yellow pad, 'g' gravity pad,
@@ -37,6 +45,7 @@ constexpr HitboxSpec kHitboxes[] = {
     {1, 's', 30.0f, 30.0f},  {2, 's', 30.0f, 30.0f}, {3, 's', 30.0f, 30.0f},
     {4, 's', 30.0f, 30.0f},  {6, 's', 30.0f, 30.0f}, {7, 's', 30.0f, 30.0f},
     {40, 's', 30.0f, 14.0f}, {62, 's', 30.0f, 16.0f}, {65, 's', 30.0f, 16.0f},
+    {68, 's', 30.0f, 16.0f},
     {8, 'h', 6.0f, 12.0f},   {9, 'h', 9.0f, 10.8f},  {39, 'h', 6.0f, 5.6f},
     {103, 'h', 4.0f, 7.6f},
     {35, 'p', 25.0f, 4.0f},  {67, 'g', 25.0f, 6.0f},
