@@ -65,6 +65,11 @@ def main():
     run_dir = Path(args.checkpoint).resolve().parent
     amp = args.amp or ckpt.get("config", {}).get("amp", "none")
 
+    if args.level is None:
+        # The checkpoint records the level it was trained on; evaluating a
+        # Polargeist policy on the default level (Stereo Madness) is never
+        # what anyone means.
+        args.level = ckpt.get("config", {}).get("level")
     trained_end = ckpt.get("config", {}).get("end_x_arg", -1.0)
     if trained_end is not None and trained_end > 0 and args.end_x < 0:
         print(f"WARNING: checkpoint was trained with --end-x {trained_end:g} "

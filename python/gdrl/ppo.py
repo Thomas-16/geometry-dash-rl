@@ -63,12 +63,24 @@ class RolloutBuffer:
         # done = terminated (bootstrap 0); trunc_value = V(final_obs) where
         # truncated, folded into the reward before GAE.
         self.terminated = np.zeros(s, np.float32)
+        # Per-sample logit bound the action was sampled under (model.py):
+        # the update must re-bound the logit identically or the PPO ratio
+        # compares two different policies.
+        self.bounds = np.full(s, 4.0, np.float32)
+        # Per-sample entropy-bonus weight (1 = full ent_coef). In mastered
+        # territory the policy gradient is ~0 (identical trajectories), so
+        # an unweighted bonus slowly erodes confidence there until deaths
+        # reappear; the trainer scales it down outside the explore zone.
+        self.ent_w = np.ones(s, np.float32)
         self.t = 0
 
     def add(self, alv: np.ndarray, rewards: np.ndarray, discounts: np.ndarray,
-            terminated: np.ndarray):
+            terminated: np.ndarray, bounds: np.ndarray | None = None,
+            ent_w: np.ndarray | None = None):
         """alv: [3, n_envs] = action, logprob, value (model.act output).
-        The obs row for this step was already copied into self.obs[t]."""
+        The obs row for this step was already copied into self.obs[t].
+        bounds: per-env logit bound used for this step (None keeps the
+        buffer's default 4); ent_w: per-env entropy weight (None = 1)."""
         i = self.t
         self.actions[i] = alv[0]
         self.logprobs[i] = alv[1]
@@ -76,6 +88,10 @@ class RolloutBuffer:
         self.rewards[i] = rewards
         self.discounts[i] = discounts
         self.terminated[i] = terminated
+        if bounds is not None:
+            self.bounds[i] = bounds
+        if ent_w is not None:
+            self.ent_w[i] = ent_w
         self.t += 1
 
     def compute_advantages(self, last_value: np.ndarray, lam: float):
@@ -134,12 +150,14 @@ class PPO:
         b_obs = buf.obs.reshape(-1, buf.obs.shape[-1])
         n = b_obs.shape[0]
         # One upload of every host-side field, then everything stays on the
-        # device: [5, n] = actions, old logprobs, old values, adv, returns.
+        # device: [7, n] = actions, old logprobs, old values, adv, returns,
+        # logit bounds, entropy weights.
         host = np.stack([buf.actions.reshape(-1), buf.logprobs.reshape(-1),
                          buf.values.reshape(-1), adv.reshape(-1),
-                         returns.reshape(-1)])
-        b_actions, b_logprobs, b_values, b_adv, b_returns = torch.as_tensor(
-            host, device=dev).unbind(0)
+                         returns.reshape(-1), buf.bounds.reshape(-1),
+                         buf.ent_w.reshape(-1)])
+        (b_actions, b_logprobs, b_values, b_adv, b_returns,
+         b_bounds, b_ent_w) = torch.as_tensor(host, device=dev).unbind(0)
 
         mb_size = n // cfg.minibatches
         if self._mb_obs is None or self._mb_obs.shape[0] != mb_size:
@@ -159,7 +177,7 @@ class PPO:
                 torch.index_select(b_obs, 0, m, out=mb_obs)
                 with autocast_ctx(dev, cfg.amp):
                     logprob, entropy, value = self.model.evaluate(
-                        mb_obs, b_actions[m])
+                        mb_obs, b_actions[m], b_bounds[m])
                 ratio = (logprob - b_logprobs[m]).exp()
                 madv = b_adv[m]
                 # std floor 1e-2: when the policy plateaus at one obstacle,
@@ -176,7 +194,9 @@ class PPO:
                 value_loss = 0.5 * torch.max(
                     (value - mr) ** 2, (v_clipped - mr) ** 2).mean()
                 ent = entropy.mean()
-                loss = policy_loss + cfg.vf_coef * value_loss - ent_coef * ent
+                ent_term = (entropy * b_ent_w[m]).mean()
+                loss = (policy_loss + cfg.vf_coef * value_loss
+                        - ent_coef * ent_term)
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(),

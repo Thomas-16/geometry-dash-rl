@@ -16,10 +16,15 @@ Two deliberate structural choices, both learned from failed runs:
   action sequences passed it), so advantages are identically zero, and the
   entropy gradient vanishes exponentially in |logit| so the entropy bonus
   can't undo it. L=4 caps action certainty at sigmoid(4) ~ 98.2%, i.e. a
-  permanent ~1.8% per-decision exploration floor. Deterministic eval
-  (logit > 0) is unaffected — tanh is monotone. The polish phase raises L
-  at runtime (plain attribute, not in state_dict) to let the training
-  distribution converge toward the argmax path.
+  ~1.8% per-decision exploration floor. Deterministic eval (logit > 0) is
+  unaffected — tanh is monotone. The bound is a per-sample input
+  (`bound` tensor [N]; a float/None falls back to `model.logit_bound`):
+  measured on Polargeist, a full run is ~3300 decisions, so a blanket
+  1.8% floor forces ~60 random flips per run and the winning policy,
+  sampled from x=0 at L=4, reached the level's last third 0.1% of the
+  time (43% at L=8). The trainer therefore keeps L=4 only near the
+  frontier and uses a high bound in territory the argmax policy already
+  clears; PPO stores each sample's bound so the ratios stay exact.
 
 Architectures:
 - "cnn" (default): per-trunk conv encoder over the (2, 24, 32) grid — the
@@ -136,21 +141,26 @@ class _ActorCriticBase(nn.Module):
         self.policy = _ortho(nn.Linear(feat_dim, 1), 0.01)  # hold logit
         self.value = _ortho(nn.Linear(feat_dim, 1), 1.0)
 
-    def forward(self, obs: torch.Tensor):
+    def forward(self, obs: torch.Tensor, bound=None):
+        """bound: per-sample logit bound tensor [N] (or a float); None uses
+        `self.logit_bound` for every row."""
         pi_feat = self.pi_body(obs)
         vf_feat = self.vf_body(obs)
+        if bound is None:
+            bound = self.logit_bound
         # Heads + bound in fp32 regardless of the trunk autocast state.
         with torch.autocast(obs.device.type, enabled=False):
             raw = self.policy(pi_feat.float()).squeeze(-1)
-            logit = self.logit_bound * torch.tanh(raw / self.logit_bound)
+            logit = bound * torch.tanh(raw / bound)
             value = self.value(vf_feat.float()).squeeze(-1)
         return logit, value
 
     @torch.no_grad()
-    def act(self, obs: torch.Tensor, deterministic: bool = False):
+    def act(self, obs: torch.Tensor, deterministic: bool = False,
+            bound=None):
         """Returns one stacked [3, N] fp32 tensor: action, logprob, value —
         one tensor so the rollout does a single device->host copy per step."""
-        logit, value = self(obs)
+        logit, value = self(obs, bound)
         if deterministic:
             action = (logit > 0).float()
             logprob = torch.zeros_like(logit)
@@ -159,8 +169,8 @@ class _ActorCriticBase(nn.Module):
             logprob = bernoulli_logprob(logit, action)
         return torch.stack([action, logprob, value])
 
-    def evaluate(self, obs: torch.Tensor, actions: torch.Tensor):
-        logit, value = self(obs)
+    def evaluate(self, obs: torch.Tensor, actions: torch.Tensor, bound=None):
+        logit, value = self(obs, bound)
         return bernoulli_logprob(logit, actions), bernoulli_entropy(logit), value
 
 
@@ -241,11 +251,11 @@ class GraphedAct:
     """CUDA-graph replay of `model.act` for a fixed batch: the rollout's
     per-step forward is ~30 small kernels whose launch overhead exceeds
     their GPU time. Call with the rollout batch already copied into
-    `self.obs` (the graph's static input); returns the static [3, N]
-    output (read it before the next call). Re-captures when the model's
-    logit bound changes (polish phase) — it is baked into the graph as a
-    constant. RNG inside the capture is graph-safe (fresh samples per
-    replay). Falls back to eager if capture fails."""
+    `self.obs` (the graph's static input) and the per-row logit bound in
+    `self.bound` (static too; initialised to the model's bound); returns
+    the static [3, N] output (read it before the next call). RNG inside
+    the capture is graph-safe (fresh samples per replay). Falls back to
+    eager if capture fails."""
 
     def __init__(self, model: _ActorCriticBase, n: int, obs_dim: int,
                  device: torch.device, amp: str):
@@ -253,14 +263,14 @@ class GraphedAct:
         self.amp = amp
         self.device = device
         self.obs = torch.zeros(n, obs_dim, device=device)
+        self.bound = torch.full((n,), float(model.logit_bound), device=device)
         self.out: torch.Tensor | None = None
         self.graph: torch.cuda.CUDAGraph | None = None
-        self.bound: float | None = None
         self.enabled = device.type == "cuda"
 
     def _eager(self) -> torch.Tensor:
         with autocast_ctx(self.device, self.amp):
-            return self.model.act(self.obs)
+            return self.model.act(self.obs, bound=self.bound)
 
     def _capture(self) -> None:
         s = torch.cuda.Stream()
@@ -273,12 +283,11 @@ class GraphedAct:
         with torch.cuda.graph(g):
             self.out = self._eager()
         self.graph = g
-        self.bound = self.model.logit_bound
 
     def __call__(self) -> torch.Tensor:
         if not self.enabled:
             return self._eager()
-        if self.graph is None or self.bound != self.model.logit_bound:
+        if self.graph is None:
             try:
                 self._capture()
             except Exception as e:  # noqa: BLE001

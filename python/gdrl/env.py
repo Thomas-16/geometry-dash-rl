@@ -159,6 +159,12 @@ class GdVecEnv:
             self._dll.gdenv_last_episode_holds(self._env, i, buf, n)
         return buf[:n].copy()
 
+    def player_x(self) -> np.ndarray:
+        """Per-env player x as of the last step/reset — read straight from
+        the obs buffer's progress scalar (obs.hpp out[5] = x / end_x), so
+        it costs nothing and needs no DLL call."""
+        return self._obs[:, 5] * self.end_x
+
     def get_render_states(self) -> np.ndarray:
         """[n, 5] = x, y, yvel, ship, dead."""
         self._dll.gdenv_get_render_states(self._env, self._render)

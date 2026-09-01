@@ -99,9 +99,51 @@ def parse_args():
                         "transitions")
     p.add_argument("--sil-episodes", type=int, default=8,
                    help="episodes replayed per SIL update")
+    # Exploration zone. The logit bound's ~1.8% per-decision floor is what
+    # cracks walls, but a full run is ~3000 decisions: applied everywhere it
+    # forces ~60 random flips per run and the mastered prefix eats them
+    # (Polargeist's winning policy, sampled from x=0 at bound 4, reached
+    # the last third of the level 0.1% of the time; 43% at bound 8). So the
+    # floor stays only where the argmax policy has not yet proven itself.
+    p.add_argument("--explore-margin", type=float, default=600.0,
+                   help="envs at x >= latest det_x - margin sample at the "
+                        "logit-bound-4 floor; everything before that (what "
+                        "the argmax policy already clears) samples at "
+                        "--mastered-bound. -1 = bound 4 everywhere")
+    p.add_argument("--mastered-bound", type=float, default=8.0,
+                   help="logit bound in the mastered zone (8 = 0.03% floor)")
+    p.add_argument("--mastered-ent", type=float, default=0.1,
+                   help="entropy-bonus weight in the mastered zone (1 = "
+                        "same as the explore zone). Advantages there are "
+                        "~0, so a full bonus erodes confidence until the "
+                        "prefix breaks again")
+    # Respawn share aimed at the explore zone itself. The pass-rate
+    # 'learnable' filter (0.1..0.8) skips the hardest wall by construction
+    # (pass rate ~0) and the wall-practice draw follows the most frequent
+    # deaths, which on a long level are mid-prefix slips, not the frontier
+    # (measured: 1% of rollout samples in the explore zone at the x=21000
+    # Polargeist wall). This draw starts a few hundred units before the
+    # det policy's death point.
+    p.add_argument("--frontier-respawn", type=float, default=0.4,
+                   help="fraction of respawns drawn from the 700 units "
+                        "before the latest det_x (0 = off)")
+    # Frontier bursts: a respawned env's job is the wall near its spawn;
+    # letting it run on to a death far downstream (or to the end) spends
+    # the rollout on territory other envs already cover. Truncating it a
+    # burst past its spawn (value-bootstrapped, exactly like the tick cap)
+    # turns tens of wall attempts per update into hundreds.
+    p.add_argument("--burst", type=float, default=1000.0,
+                   help="respawned episodes are truncated (bootstrapping "
+                        "V) this many x units past their spawn, then "
+                        "respawn again; 0 = run to death")
+    p.add_argument("--polish-det", type=float, default=1.0,
+                   help="also enter the polish phase once the det eval "
+                        "reaches this fraction of the level (1 = det win; "
+                        "0 = off). --polish-wins remains as the other gate")
     return p.parse_args()
 
 
+EXPLORE_LOGIT_BOUND = 4.0
 POLISH_LOGIT_BOUND = 8.0
 POLISH_ENT_COEF = 1e-4
 POLISH_MAX_LR = 1e-4
@@ -111,7 +153,7 @@ LOG_COLUMNS = ("update,global_ticks,mean_final_x,best_final_x,best_x_ever,"
                "win_rate,episodes,mean_ep_ticks,sps,policy_loss,value_loss,"
                "entropy,approx_kl,clip_frac,lr,det_x,det_win,"
                "samples_s,t_rollout,t_update,t_sil,t_det_wait,t_ckpt,"
-               "t_roll_gpu,t_roll_env,t_roll_misc\n")
+               "t_roll_gpu,t_roll_env,t_roll_misc,frac_explore\n")
 
 
 class EpisodeRecorder:
@@ -447,6 +489,13 @@ def main():
     respawn_passes: dict[int, float] = {}
     respawn_x = np.full(env.n_envs, -1.0)  # spawn x; -1 = from-start
     window_deaths: list[float] = []
+    # Latest det-eval reach: the argmax policy provably clears everything
+    # before it, so that prefix is the "mastered zone" (see --explore-margin).
+    det_x_latest = 0.0
+    # Per-env logit bound for the current step (pinned host + graph input).
+    bound_host = torch.full((env.n_envs,), EXPLORE_LOGIT_BOUND,
+                            pin_memory=device.type == "cuda")
+    bound_np = bound_host.numpy()
 
     sil_buf = sil.SILBuffer()
     silu = sil.SIL(model, algo.optimizer, device, args.gamma,
@@ -472,6 +521,7 @@ def main():
             sil_buf.load_state_dict(ckpt["sil"])
         respawn_attempts = ckpt.get("respawn_attempts", respawn_attempts)
         respawn_passes = ckpt.get("respawn_passes", respawn_passes)
+        det_x_latest = ckpt.get("det_x_latest", 0.0)
         if bank:
             print(f"restored bank: {sum(len(v) for v in bank.values())} "
                   f"states, deepest {bank_deepest():.0f}; "
@@ -515,6 +565,7 @@ def main():
                     "rng_state": rng.bit_generator.state,
                     "respawn_attempts": respawn_attempts,
                     "respawn_passes": respawn_passes,
+                    "det_x_latest": det_x_latest,
                     "sil": sil_buf.state_dict(),
                     "config": vars(args)}, path)
 
@@ -532,13 +583,26 @@ def main():
             # Rollout sub-phases: gpu = H2D + act + D2H sync, env = DLL step,
             # misc = Python bookkeeping (recorder, bank, respawn).
             t_roll_gpu = t_roll_env = t_roll_misc = 0.0
+            n_explore = 0
             t_step0 = time.perf_counter()
             buf.reset()
+            # Mastered zone for this update: x < latest det reach - margin.
+            explore_lo = (det_x_latest - args.explore_margin
+                          if args.explore_margin >= 0 else -1.0)
             for step_i in range(cfg.rollout_steps):
                 # The env's obs buffer (pinned) is the source of truth: H2D into
                 # the graph's static input, act, then keep a copy in the rollout
                 # slot (device->device, async and cheap).
                 gact.obs.copy_(env.obs_tensor, non_blocking=True)
+                # Exploration floor only at/after the frontier; the mastered
+                # prefix runs near-argmax so from-start envs actually get there.
+                explore = env.player_x() >= explore_lo
+                n_explore += int(explore.sum())
+                bound_np[:] = np.where(explore, EXPLORE_LOGIT_BOUND,
+                                       args.mastered_bound)
+                ent_w_np = np.where(explore, 1.0, args.mastered_ent).astype(
+                    np.float32)
+                gact.bound.copy_(bound_host, non_blocking=True)
                 alv = gact()
                 buf.obs[step_i].copy_(gact.obs, non_blocking=True)
                 alv_host.copy_(alv)  # one D2H sync: action, logprob, value
@@ -551,14 +615,45 @@ def main():
 
                 rewards = rew * args.reward_scale
                 discounts = (args.gamma ** info["ticks"]).astype(np.float32)
-                if trunc.any():
-                    mask = trunc.astype(bool)
-                    fo = torch.as_tensor(info["final_obs"][mask], device=device)
-                    with torch.no_grad(), autocast_ctx(device, cfg.amp):
-                        v_final = model(fo)[1].float().cpu().numpy()
+                # Episode-end fields for this step; bursts (below) are
+                # trainer-side truncations the DLL knows nothing about.
+                final_x_i = info["final_x"].copy()
+                won_i = info["won"].copy()
+                burst_i = np.zeros(env.n_envs, bool)
+                trunc_i = trunc.astype(bool)
+                if args.burst > 0:
+                    x_now = env.player_x()
+                    burst_i = ((respawn_x >= 0.0) & ~done
+                               & (x_now >= respawn_x + args.burst))
+                    if burst_i.any():
+                        final_x_i[burst_i] = x_now[burst_i]
+                        won_i[burst_i] = 0.0
+                        done = done | burst_i
+                # Bootstrap V(final obs) for tick-cap truncations and bursts
+                # in one forward THROUGH THE ROLLOUT GRAPH: an eager forward
+                # on a batch whose size varies per step makes
+                # cudnn.benchmark re-autotune the convs for every new size
+                # (measured: rollout misc time 0.01 s -> 0.2-1.5 s/update
+                # while bursts are frequent). The graph's static input is
+                # free to reuse here — it is refilled at the next step. A
+                # burst env is still alive, so its current obs row is the
+                # final obs.
+                boot = trunc_i | burst_i
+                if boot.any():
+                    k = int(boot.sum())
+                    fo = np.empty((k, env.obs_dim), np.float32)
+                    nt = int(trunc_i.sum())
+                    if nt:
+                        fo[:nt] = info["final_obs"][trunc_i]
+                    if k > nt:
+                        fo[nt:] = env._obs[burst_i]
+                    gact.obs[:k].copy_(torch.from_numpy(fo))
+                    v_final = gact()[2, :k].float().cpu().numpy()
                     rewards = rewards.copy()
-                    rewards[mask] += discounts[mask] * v_final
-                buf.add(alv_np, rewards, discounts, done.astype(np.float32))
+                    rewards[trunc_i] += discounts[trunc_i] * v_final[:nt]
+                    rewards[burst_i] += discounts[burst_i] * v_final[nt:]
+                buf.add(alv_np, rewards, discounts, done.astype(np.float32),
+                        bound_np, ent_w_np)
 
                 # Progress stats and replayable traces only from x=0 episodes.
                 done_fs = done & from_start
@@ -575,7 +670,7 @@ def main():
                     best_x = max(best_x, float(fx.max()))
                 if done.any():
                     window_reach = max(window_reach,
-                                       float(info["final_x"][done].max()))
+                                       float(final_x_i[done].max()))
                 total_episodes += int(done.sum())
 
                 # Bank a few live snapshots; respawn dead envs from the bank.
@@ -598,8 +693,6 @@ def main():
                         and 0.1 <= (respawn_passes.get(b, 0.0)
                                     / respawn_attempts[b]) <= 0.8]
                     buckets = sorted(bank)
-                    won_i = info["won"]
-                    final_x_i = info["final_x"]
                 for i in done_idx:
                     if respawn_x[i] >= 0.0:  # a respawned episode just ended
                         b = int(respawn_x[i] // kBucket)
@@ -607,13 +700,19 @@ def main():
                         if (won_i[i]
                                 or final_x_i[i] >= respawn_x[i] + kBucket):
                             respawn_passes[b] = respawn_passes.get(b, 0.0) + 1.0
-                    if not won_i[i]:
+                    if not won_i[i] and not burst_i[i]:
                         recent_deaths.append(float(final_x_i[i]))
                         window_deaths.append(float(final_x_i[i]))
                     if bank and rng.random() < respawn_prob:
                         picked = None
                         u = rng.random()
-                        if u < 0.5 and learnable:
+                        if (det_x_latest > 700.0
+                                and rng.random() < args.frontier_respawn):
+                            # Frontier: just before where the argmax policy
+                            # dies (see --frontier-respawn).
+                            picked = bank_pick(det_x_latest - 700.0,
+                                               det_x_latest - 50.0)
+                        if picked is None and u < 0.5 and learnable:
                             # Learnable zone: spawn buckets the policy passes
                             # sometimes but not reliably — where practice moves
                             # the needle fastest.
@@ -635,6 +734,8 @@ def main():
                         from_start[i] = False
                         respawn_x[i] = picked[0]
                     else:
+                        if burst_i[i]:  # alive in the DLL: reset it ourselves
+                            env.reset_env(int(i))
                         from_start[i] = True
                         respawn_x[i] = -1.0
 
@@ -692,16 +793,6 @@ def main():
             win_rate = window_wins / n_eps if n_eps else 0.0
             mean_ticks = float(np.mean(window_ep_ticks)) if n_eps else 0.0
 
-            if not polish and not args.no_polish and (
-                    (args.polish_at >= 0 and update + 1 >= args.polish_at)
-                    or (args.polish_at < 0 and total_wins >= args.polish_wins)):
-                polish = True
-                model.logit_bound = POLISH_LOGIT_BOUND
-                respawn_prob = min(respawn_prob, POLISH_RESPAWN)
-                print(f"upd {update:4d} | POLISH: {total_wins} wins — logit "
-                      f"bound {POLISH_LOGIT_BOUND}, ent {POLISH_ENT_COEF}, "
-                      f"lr<={POLISH_MAX_LR}, respawn {respawn_prob}")
-
             # Det eval: collect the previous eval's result (waiting only if a
             # new one is due or this is the last update), then launch the next.
             det_x, det_win = -1.0, False
@@ -717,6 +808,29 @@ def main():
             t_det_wait = time.perf_counter() - t0
             if det_results:
                 det_x, det_win, _ = det_results[-1]
+                det_x_latest = det_x
+
+            # Polish gate: cumulative stochastic from-start wins (the
+            # original), a forced update, or the det eval reaching
+            # --polish-det of the level. On long levels the stochastic
+            # gate never fires (Polargeist: 0 from-start wins in 730
+            # updates while the det policy won), so the det gate is the
+            # one that matters there.
+            det_gate = (args.polish_det > 0 and det_x_latest
+                        >= args.polish_det * env.end_x - 0.5)
+            if not polish and not args.no_polish and (
+                    (args.polish_at >= 0 and update + 1 >= args.polish_at)
+                    or (args.polish_at < 0 and (total_wins >= args.polish_wins
+                                                or det_gate))):
+                polish = True
+                # Mastered zone already samples at --mastered-bound; the SIL
+                # / eval-side bound follows the polish value as before.
+                model.logit_bound = POLISH_LOGIT_BOUND
+                respawn_prob = min(respawn_prob, POLISH_RESPAWN)
+                print(f"upd {update:4d} | POLISH: {total_wins} wins, det "
+                      f"{det_x_latest:.0f} — logit bound {POLISH_LOGIT_BOUND}, "
+                      f"ent {POLISH_ENT_COEF}, lr<={POLISH_MAX_LR}, respawn "
+                      f"{respawn_prob}")
 
             row = (f"{update},{global_ticks},{mean_x:.1f},{max_x:.1f},"
                    f"{best_x:.1f},{win_rate:.4f},{n_eps},{mean_ticks:.0f},"
@@ -799,16 +913,18 @@ def main():
             t_total = time.perf_counter() - t_upd0
             samples_s = cfg.rollout_steps * env.n_envs / max(t_total, 1e-9)
             last_sps, last_samples_s = sps, samples_s
+            frac_explore = n_explore / (cfg.rollout_steps * env.n_envs)
             with open(log_path, "a") as f:
                 f.write(row + f",{samples_s:.0f},{t_roll:.3f},{t_update:.3f},"
                               f"{t_sil:.3f},{t_det_wait:.3f},{t_ckpt:.3f},"
                               f"{t_roll_gpu:.3f},{t_roll_env:.3f},"
-                              f"{t_roll_misc:.3f}\n")
+                              f"{t_roll_misc:.3f},{frac_explore:.3f}\n")
             print(f"upd {update:4d} | x {mean_x:7.1f} avg {max_x:7.1f} max "
                   f"(best {best_x:7.1f}, {100 * best_x / env.end_x:5.1f}%) | "
                   f"win {win_rate:.2%} | {sps / 1e6:.2f}M ticks/s | "
                   f"{samples_s / 1e3:.1f}k dec/s | "
                   f"ent {stats['entropy']:.3f}{det_str}{die_str}"
+                  f" | xpl {frac_explore:.2f}"
                   f" | {t_roll:.2f}s roll ({t_roll_gpu:.2f} gpu {t_roll_env:.2f} "
                   f"env {t_roll_misc:.2f} misc) {t_update:.2f}s upd"
                   f"{f' {t_sil:.2f}s sil' if sil_env is not None else ''}"
