@@ -33,11 +33,22 @@ namespace {
 // exactly like 62/65 (square_b_01/04); traces/session9/objects.csv confirms
 // type 0, 30x16. Ids 22/26/32/33 share case 9 (0x140193ce1): enter-effect
 // / trail triggers, no collision.
+//
+// Pink jump pad (140, Can't Let Go): customSetup case 0x140191a67 sets
+// m_objectType 9 (yellow pad 35 is the twin case 0x14019190d with type 8)
+// and no rect scale, so the hitbox is its sprite frame's content size:
+// traces/session13/objects.csv reports type 9, 25x5 centered on the object
+// (the bump_03_001 frame; bump_02_001 at 29x7 is the red pad and fired one
+// tick early at the session13 pad, x 19485). Frame sizes come from the 1x
+// GJ_GameSheet.plist: every engine-reported size matches that sheet where
+// the -hd/-uhd sheets disagree (pit 9 = 30x27 vs 30.25x26.5, spike 39 =
+// 30x14 vs 30x13.5). Id 24 is another enter-effect trigger (case 9; the
+// engine lists it as type 20, 30x30, no collision).
 struct HitboxSpec {
     int id;
     char kind; // 's' solid, 'h' hazard, 'p' yellow pad, 'g' gravity pad,
                // 'n' normal-gravity portal, 'f' flip-gravity portal,
-               // 'r' yellow jump ring
+               // 'r' yellow jump ring, 'k' pink jump pad
     float w, h;
 };
 
@@ -51,6 +62,7 @@ constexpr HitboxSpec kHitboxes[] = {
     {35, 'p', 25.0f, 4.0f},  {67, 'g', 25.0f, 6.0f},
     {10, 'n', 25.0f, 75.0f}, {11, 'f', 25.0f, 75.0f},
     {36, 'r', 30.0f * 1.2f, 30.0f * 1.2f},
+    {140, 'k', 25.0f, 5.0f},
 };
 
 const HitboxSpec* findSpec(int id) {
@@ -117,6 +129,10 @@ LevelGeometry LevelGeometry::build(const gd::Level& level) {
                 break;
             case 'r':
                 g.specials.push_back(Special{b, SpecialKind::YellowRing, false});
+                break;
+            case 'k':
+                g.specials.push_back(
+                    Special{b, SpecialKind::PinkPad, padIsFlipped(obj)});
                 break;
         }
     }

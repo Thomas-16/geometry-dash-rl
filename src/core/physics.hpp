@@ -10,9 +10,9 @@ namespace gdcore {
 
 // Per-tick cube physics at 240 TPS, derived empirically from real-game traces
 // (see traces/ and tools/). All constants are for the 0.9x ("normal") speed
-// that the first five official levels use throughout (Dry Out / Base After
-// Base add nothing beyond the slab id 68 and reachable flip portals — see
-// geometry.cpp).
+// that the first six official levels use throughout (Dry Out / Base After
+// Base add nothing beyond the slab id 68 and reachable flip portals; Can't
+// Let Go adds the pink jump pad id 140 — see geometry.cpp and pad::).
 //
 // Verified bit-exact against traces at float32 position level. The game's
 // internal per-tick order is:
@@ -166,7 +166,14 @@ constexpr double kSnapWindow = 6.0;
 //   propellPlayer: yvel = round3(f64(f32(sign) * f32(bumpMod * 16.0f) *
 //                  sizeMul)), sign from the player's CURRENT gravity,
 //                  sizeMul 1.0 (0.8 mini); clears m_isOnGround / can-jump.
-//   yellow pad (type 8): bumpMod 1.0 -> 16.0
+//   yellow pad (type 8): bumpMod 1.0 -> 16.0 (every mode)
+//   pink pad (type 9, id 140, Can't Let Go): bumpPlayer 0x2179d0 picks the
+//                  bumpMod by player mode (0x140217a6f..: m_isShip +0x9b9
+//                  0.35, m_isBird +0x9ba 0.4, m_isBall +0x9bb / m_isSpider
+//                  +0x9be 0.7, otherwise (cube) 0.65 -> 10.4); then
+//                  the same wrapper 0x39f6a0 -> propellPlayer path as the
+//                  yellow pad (boost flag +0x952 cleared, only the red pad
+//                  type 34 sets it).
 //   gravity pad (type 10): only when the player's gravity differs from the
 //                  pad's target; bumpMod 0.8 -> 12.8, then flipGravity(true)
 //   flipGravity: m_isUpsideDown = flip, then yvel *= 0.5 as a RAW double
@@ -175,6 +182,8 @@ constexpr double kSnapWindow = 6.0;
 namespace pad {
 constexpr float kBase = 16.0f;                  // .rdata 0x1406230f8
 constexpr float kGravityBumpMod = 0.8f;         // .rdata 0x140622ba4
+constexpr float kPinkBumpModCube = 0.65f;       // .rdata 0x140622b5c
+constexpr float kPinkBumpModShip = 0.35f;       // .rdata 0x140622abc
 constexpr double kFlipDamp = 0.5;               // .rdata 0x140622d98
 // Upside-down cube below the floor line: checkCollisions snaps it to y=105
 // and skips the rest of the collision pass — unless within 0.1 s of the
@@ -486,10 +495,14 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
         const bool done = k < 64 && ((s.specialDone >> k) & 1u);
         const double sign = s.upsideDown ? -1.0 : 1.0;
         switch (sp.kind) {
-            case SpecialKind::YellowPad: {
+            case SpecialKind::YellowPad:
+            case SpecialKind::PinkPad: {
                 if (done) break;
                 if (k < 64) s.specialDone |= uint64_t{1} << k;
-                float v = static_cast<float>(sign) * (1.0f * pad::kBase) * 1.0f;
+                const float bumpMod =
+                    sp.kind == SpecialKind::YellowPad ? 1.0f
+                    : (s.ship ? pad::kPinkBumpModShip : pad::kPinkBumpModCube);
+                float v = static_cast<float>(sign) * (bumpMod * pad::kBase) * 1.0f;
                 s.yvel = roundVel(static_cast<double>(v));
                 s.onGround = false;
                 break;

@@ -51,6 +51,8 @@ enum class SpecialKind : uint8_t {
     GravityNormal,  // id 10, type 4: flipGravity(false)
     GravityFlip,    // id 11, type 3: flipGravity(true)
     YellowRing,     // id 36, type 11: ringJump -> yvel = +-jump (11.18)
+    PinkPad,        // id 140, type 9: propellPlayer(0.65 cube / 0.35 ship)
+                    //   -> |yvel| 10.4 / 5.6 (Can't Let Go)
 };
 
 struct Special {

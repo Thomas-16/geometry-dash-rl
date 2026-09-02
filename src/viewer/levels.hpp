@@ -6,8 +6,10 @@
 // trace-verified too (traces/session8, 39 orb activations, 75% of the
 // level). Dry Out and Base After Base add only the slab id 68 and reachable
 // flip portals; traces/session9 (Dry Out to 93%) and traces/session10 (a
-// full Base After Base completion) match bit-exactly. Every other entry
-// renders but its sim is unverified, which the GUI labels loudly.
+// full Base After Base completion) match bit-exactly. Can't Let Go adds
+// the pink jump pad id 140; traces/session13 (a full open-loop completion
+// by the replay mod) matches bit-exactly. Every other entry renders but its
+// sim is unverified, which the GUI labels loudly.
 #pragma once
 
 #include <cstddef>
@@ -27,7 +29,7 @@ inline constexpr LevelInfo kLevels[] = {
     {3, "Polargeist", "Polargeist", true},
     {4, "Dry Out", "DryOut", true},
     {5, "Base After Base", "BaseAfterBase", true},
-    {6, "Can't Let Go", "CantLetGo", false},
+    {6, "Can't Let Go", "CantLetGo", true},
     {7, "Jumper", "Jumper", false},
     {8, "Time Machine", "TimeMachine", false},
     {9, "Cycles", "Cycles", false},
