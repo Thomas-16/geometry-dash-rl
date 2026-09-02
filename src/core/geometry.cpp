@@ -44,6 +44,15 @@ namespace {
 // the -hd/-uhd sheets disagree (pit 9 = 30x27 vs 30.25x26.5, spike 39 =
 // 30x14 vs 30x13.5). Id 24 is another enter-effect trigger (case 9; the
 // engine lists it as type 20, 30x30, no collision).
+//
+// Jumper (level 7) adds a single id, 73 (square_c_05_001, 30x30 frame). The
+// customSetup byte table (0x140194b44, indexed by id - 5) sends it to the
+// same case as id 5: case 0 at 0x14019371e, which sets m_objectType (+0x3a0)
+// to 7 = Decoration before joining the plain-block tail — id 5 is reported
+// as type 7, 30x30 in every objects.csv dump and has never collided in six
+// verified levels. So 73 is decoration like 5 and is deliberately absent
+// from the table below. Jumper's real novelty is gravity portals inside a
+// ship section (x 7565 / 8403 / 9145), handled in physics.hpp.
 struct HitboxSpec {
     int id;
     char kind; // 's' solid, 'h' hazard, 'p' yellow pad, 'g' gravity pad,

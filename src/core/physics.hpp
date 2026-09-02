@@ -10,9 +10,11 @@ namespace gdcore {
 
 // Per-tick cube physics at 240 TPS, derived empirically from real-game traces
 // (see traces/ and tools/). All constants are for the 0.9x ("normal") speed
-// that the first six official levels use throughout (Dry Out / Base After
+// that the first seven official levels use throughout (Dry Out / Base After
 // Base add nothing beyond the slab id 68 and reachable flip portals; Can't
-// Let Go adds the pink jump pad id 140 — see geometry.cpp and pad::).
+// Let Go adds the pink jump pad id 140 — see geometry.cpp and pad::; Jumper
+// adds nothing to the object set but is the first level that flips gravity
+// WHILE FLYING — see the ship:: notes on the upside-down ship).
 //
 // Verified bit-exact against traces at float32 position level. The game's
 // internal per-tick order is:
@@ -87,6 +89,24 @@ namespace gdcore {
 //     activatedByPlayer marks the ring used for the rest of the attempt
 //     (collisionCheckObjects skips objects whose hasBeenActivatedByPlayer
 //     is set).
+// PlayerObject::m_gravity (+0x7c8) and m_jumpAccel (+0x7c0) are set by
+// PlayerObject::updateTimeMod (win 2.2081 base+0x3a0d50) from the speed:
+// speed 0.9f -> m_jumpAccel 0x40265c2d20000000 (11.18003..., which the
+// 3-decimal velocity setter turns into exactly 11.18) and m_gravity
+// 0x3feea99100000000 = 0.95819902420043945 = the float 0x3f754c88 widened
+// (0.7 -> 0.940199, 1.1 -> 0.957199, 1.3 -> 0.961199). PlayerObject::init
+// calls updateTimeMod(0.9f) once and nothing in a plain level rewrites the
+// field, so EVERY mode runs with this gravity: updateJump reads
+// f32(m_gravity) for the cube (0x14038ba20) and the flying modes load the
+// same value as a float constant from .rdata 0x140622bf8 (0x14038ba86).
+// Earlier notes fitted the cube gravity as f32(0.225f * 0.96f) =
+// 0.21599999; the engine value is f32(0.225f * 0.95819902f) = 0.21559478.
+// The two are indistinguishable through the 3-decimal velocity setter
+// unless yvel carries a 4th decimal (no recorded cube tick does, and the
+// half-thousandth ties after a portal halving round the same way), but the
+// disassembly is unambiguous, so the engine value is used.
+constexpr float kGravity = 0.95819902420043945f; // m_gravity at speed 0.9
+
 struct PhysicsConfig {
     float dx;        // per-tick x advance
     double gravity;  // per-tick yvel decrement (float precision, as double)
@@ -97,21 +117,20 @@ struct PhysicsConfig {
     float half;      // half extent of the solid player box
     float inner;     // half extent of the inner (death) box
     float landClip;  // max depth below a solid top that still lands
-    // m_gravity (+0x7c8) as the pure cube carries it (0.96; every other mode
-    // substitutes the 0.9581990242 constant, see ship::kGrav). Only the
-    // "is falling" test below reads it - the per-tick gravity is `gravity`.
-    double gravityMul = 0.96;
+    // m_gravity (+0x7c8): kGravity for every mode at speed 0.9. The
+    // playerIsFallingBugged test reads it as a double (2 * m_gravity).
+    double gravityMul = static_cast<double>(kGravity);
 };
 
 inline PhysicsConfig stereoMadnessCube() {
     return PhysicsConfig{
         static_cast<float>(5.770002 * 0.9 * 0.25),
-        // updateJump: f64(f32(f32(dt * 0.9f) * f32(m_gravity 0.96))) =
-        // 0.21599999070 — NOT f32(0.216) = 0.21600000560. The 1-ulp gap only
-        // decides 3-decimal rounding ties, which arise after a mode portal
+        // updateJump 0x14038c2d0: f64(f32(f32(dt * 0.9f) * f32(m_gravity)))
+        // = 0.21559478 (see kGravity). Rounding ties after a mode portal
         // halves an odd-thousandth yvel raw (session7 attempt_0002 tick
-        // 12894: -1.2995 - g rounds to -1.515, not -1.516).
-        static_cast<double>((0.25f * 0.9f) * 0.96f),
+        // 12894: -1.2995 - g -> -1.515, not -1.516) resolve the same way as
+        // with the old fitted 0.21599999 constant.
+        static_cast<double>((0.25f * 0.9f) * kGravity),
         -15.0,
         0.225f,
         11.18,
@@ -128,30 +147,51 @@ inline PhysicsConfig stereoMadnessCube() {
 //
 // PlayerObject::update multiplies the incoming dt (0.25 frame-units) by a
 // hard-coded 0.9f before calling updateJump, so the per-tick velocity unit is
-// A = f32(f32(0.25*0.9f) * f32(0.958199...)). Per tick:
-//   bugged = playerIsFallingBugged() = yvel < f64(2*f32(gravity)) (normal g)
+// A = f32(f32(0.25*0.9f) * f32(0.958199...)). Per tick, with
+// sign = m_isUpsideDown ? -1 : +1 (0x14038c665: the int -1/1 converted to
+// float and multiplied into the unit before factor and scale):
+//   bugged = playerIsFallingBugged() (0x39a430, the same helper as the cube:
+//            normal gravity yvel < f64(f32(2*m_gravity)), flipped
+//            yvel > 2*m_gravity — the same 1.916398 both ways)
 //   factor = holding ? -1.0 : (bugged ? 0.8 : 1.2)
 //   scale  = (holding && bugged) ? 0.5 : 0.4
-//   yvel   = round3(yvel - f32(f32(f32(1*A)*factor)*scale))   [/0.85 if mini]
-// then, unless an external boost flag is set (never in Stereo Madness), two
-// clamp writes through the rounding setter:
-//   yvel = round3(max(yvel, f64(f32(0.8f*-8.0f))))   // -6.4
-//   yvel = round3(min(yvel, f64(8.0f)))              // +8.0
+//   yvel   = round3(yvel - f32(f32(f32(sign*A)*factor)*scale))   [/0.85 mini]
+// then, unless an external boost flag is set (never in these levels), two
+// clamp writes through the rounding setter (0x14038ca9f; xmm7 = 0.8f,
+// xmm13 = 8.0f, .rdata 0x1406237fc = -8.0f):
+//   normal:  yvel = round3(max(yvel, f64(f32(0.8f*-8.0f))))   // -6.4
+//            yvel = round3(min(yvel, f64(8.0f)))              // +8.0
+//   flipped: yvel = round3(max(yvel, f64(-8.0f)))             // -8.0
+//            yvel = round3(min(yvel, f64(f32(0.8f*8.0f))))    // +6.4
+// so holding pushes the upside-down ship DOWN (toward the floor) and gravity
+// pulls it up, the exact mirror. Session5 attempt_0003 tick 7593 (yvel
+// 1.918 while holding gained 0.086, not 0.108) pins the falling threshold
+// below 1.918, i.e. m_gravity is the 0.9582 constant, not 0.96.
 namespace ship {
-// float bits 0x3f754c88, the gravity constant at .rdata 0x140622bf8
-constexpr float kGrav = 0.95819902420043945f;
+constexpr float kGrav = kGravity; // .rdata 0x140622bf8, bits 0x3f754c88
 constexpr float kDtGrav = 0.25f * 0.9f * kGrav;             // A
-constexpr double kBuggedThresh = static_cast<double>(kGrav + kGrav);
 constexpr double kMinYVel = static_cast<double>(0.8f * -8.0f); // f32(-6.4)
 constexpr double kMaxYVel = 8.0;
+constexpr double kMinYVelFlipped = static_cast<double>(-8.0f);
+constexpr double kMaxYVelFlipped = static_cast<double>(0.8f * 8.0f); // 6.4f
 // Flying band (GJBaseGameLayer::checkCollisions head): floor at 90, ceiling
 // at floor + 300 (getGroundHeightForMode, ship portal type 5 -> 300.0).
 // Player-center clamp lines are +-half the 30-unit box.
 constexpr float kCeilY = 90.0f + 300.0f - 15.0f; // 375
 // Note: checkCollisions has a 0.2s post-portal snap grace, but only on the
-// no-mode/dual path — the ship path snaps unconditionally (0x140213dea goes
-// straight to the snap; the [0x7d8]/[0x800] time checks are on the sil=1
-// branch reachable only with every mode flag clear).
+// all-flags-clear (dual) path — the ship path snaps unconditionally
+// (0x140213dea / 0x140214090 go straight to the snap; the [0x7d8]/[0x800]
+// time checks sit on the branch reachable only with every mode flag clear).
+// The snap itself (both gravities, 0x140213da1 / 0x140214042):
+//   ceiling: y = 375; if yvel > 0: hitGround(null, !upsideDown)
+//   floor:   y = 105; if yvel < 0: hitGround(null, upsideDown)
+// hitGround (0x39bf30) zeroes yvel and sets m_isOnGround unless
+// sign*yvel > 5.0 at entry (its r12 gate; the second argument only picks
+// the landing animation). A "restore the pre-snap yvel" path exists for the
+// upside-down ship (r12 / [rbp+0x67] at 0x140213e6c) but is gated on the
+// ceiling height having changed since the previous tick ([r14+0x764] is
+// refreshed after checkCollisions every update), which never happens in a
+// level without camera/ceiling triggers.
 // Solid top/bottom snap window for flying modes (collidedWithObjectInternal
 // prologue at 0x140391c11: ship/bird/dart/swing in classic mode replace the
 // default 10.0 window with f64(f32(sign*6.0)); the pure cube keeps 10.0).
@@ -159,6 +199,28 @@ constexpr float kCeilY = 90.0f + 300.0f - 15.0f; // 375
 // the floor block sits 8.5 under the player — w=10 would land, the real
 // game (w=6) passes through and dies by inner box.
 constexpr double kSnapWindow = 6.0;
+// Object contacts for a flying player, per object in descending load order
+// (collidedWithObjectInternal, static objects; the window w = 6 is signed
+// by gravity inside the engine, the lines below are already in world y):
+//   block 1 (0x14039247f, normal gravity any mode / flipped flying modes):
+//     taken when playerBottom + 6 >= objTop at the current OR pre-movement
+//     y; if yvel <= 0 it snaps y = objTop + 15. The object is then "handled"
+//     even when yvel > 0 (al = 0 at 0x140392893), so block 2 never runs for
+//     it.
+//   block 2 (0x140392a05, normal flying / flipped any mode): taken when
+//     objBottom >= playerTop - 6 (current or pre-movement); if yvel >= 0 it
+//     snaps y = objBottom - 15 (0x140392ec8).
+//   After either snap: if the object is "overhead" in gravity terms (the
+//   bl flag, 0x14039239b / 0x1403923df) the call is hitHead (0x39bed0 =
+//   hitGround with m_isOnGround / +0xa0c / +0xa10 saved and restored: yvel
+//   = 0 only), otherwise hitGround(obj) which also grounds the player. For
+//   axis-aligned static boxes the overhead flag is implied by the block:
+//   normal gravity lands in block 1 and bumps its head in block 2; the
+//   upside-down ship bumps its head on object TOPS in block 1 (moving down,
+//   yvel <= 0) and lands on object BOTTOMS in block 2 (falling upward,
+//   yvel >= 0). The "remembered object" bypass ([0x5e0]/[0x5e4] = last
+//   tick's contacts, 0x140392a53) only re-admits an object that fails the
+//   window test, which a static box a player rests against never does.
 } // namespace ship
 
 // Pads and gravity (GJBaseGameLayer::bumpPlayer 0x2179d0, PlayerObject::
@@ -329,20 +391,22 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
 inline void checkDeaths(PlayerState& s, const PhysicsConfig& c,
                         const LevelGeometry& g);
 
-// PlayerObject "is falling" helper (win 2.2081 base+0x39a430), for the
-// classic cube (no sideways/swing/platformer flags): normal gravity ->
+// PlayerObject::playerIsFallingBugged (win 2.2081 base+0x39a430), with no
+// sideways/swing/platformer flags: normal gravity ->
 // yvel < f64(f32(2 * f32(m_gravity))); flipped -> yvel > 2 * m_gravity (as a
-// double). updateJump's fall path (0x38c27b..0x38c2ae) clears m_isOnGround
+// double). Both thresholds are 1.916398 (m_gravity is a widened float).
+// The cube's updateJump fall path (0x38c27b..0x38c2ae) clears m_isOnGround
 // ONLY when this returns true, evaluated on the yvel BEFORE this tick's
 // gravity is added. The threshold makes the flag asymmetric: a normal cube
-// walking off a ledge is cleared at once (yvel 0 < 1.92), but a flipped cube
-// keeps m_isOnGround - and stays jumpable - for 9 ticks after leaving the
-// underside of a block (yvel 0.216 .. 1.944, cleared once it exceeds 1.92).
-// Seen as onground=1 streaks in every Dry Out / Base After Base trace and
-// as the replay-mod death at BAB tick 15202 (session12): the sim used to
-// drop the flag at the head of every collision pass, so the press that the
-// real game turned into a jump off the slab was a no-op here.
-inline bool cubeIsFalling(const PlayerState& s, const PhysicsConfig& c) {
+// walking off a ledge is cleared at once (yvel 0 < 1.916), but a flipped
+// cube keeps m_isOnGround - and stays jumpable - for 9 ticks after leaving
+// the underside of a block (yvel 0.216 .. 1.944, cleared once it exceeds
+// the threshold). Seen as onground=1 streaks in every Dry Out / Base After
+// Base trace and as the replay-mod death at BAB tick 15202 (session12): the
+// sim used to drop the flag at the head of every collision pass, so the
+// press that the real game turned into a jump off the slab was a no-op
+// here. The flying branch calls the same helper for its "bugged" factor.
+inline bool isFallingBugged(const PlayerState& s, const PhysicsConfig& c) {
     if (!s.upsideDown) {
         const float g = static_cast<float>(c.gravityMul);
         return static_cast<double>(g + g) > s.yvel;
@@ -375,7 +439,7 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
             // then (0x14038c2b5) yvel -= f64(sign * f32(g)) and the clamp
             // toward the gravity direction, both through the 3-decimal
             // rounding.
-            if (cubeIsFalling(s, c)) s.onGround = false;
+            if (isFallingBugged(s, c)) s.onGround = false;
             s.yvel = roundVel(s.yvel - sign * c.gravity);
             if (!s.upsideDown) {
                 if (s.yvel < c.minYVel) s.yvel = c.minYVel;
@@ -384,15 +448,22 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
             }
         }
     } else {
-        // updateJump flying branch; see the ship:: constants above. Only the
-        // normal-gravity ship is modeled (no level in scope flips a ship).
-        bool bugged = s.yvel < ship::kBuggedThresh;
-        float factor = s.holding ? -1.0f : (bugged ? 0.8f : 1.2f);
-        float scale = (s.holding && bugged) ? 0.5f : 0.4f;
-        float inc = ((1.0f * ship::kDtGrav) * factor) * scale;
+        // updateJump flying branch; see the ship:: notes above. The gravity
+        // sign enters as the float -1/+1 at 0x14038c665 (Jumper flips the
+        // ship at x 7565 / 8403 / 9145).
+        const bool bugged = isFallingBugged(s, c);
+        const float factor = s.holding ? -1.0f : (bugged ? 0.8f : 1.2f);
+        const float scale = (s.holding && bugged) ? 0.5f : 0.4f;
+        const float signf = s.upsideDown ? -1.0f : 1.0f;
+        const float inc = ((signf * ship::kDtGrav) * factor) * scale;
         s.yvel = roundVel(s.yvel + static_cast<double>(-inc));
-        s.yvel = roundVel(std::max(s.yvel, ship::kMinYVel));
-        s.yvel = roundVel(std::min(s.yvel, ship::kMaxYVel));
+        if (!s.upsideDown) {
+            s.yvel = roundVel(std::max(s.yvel, ship::kMinYVel));
+            s.yvel = roundVel(std::min(s.yvel, ship::kMaxYVel));
+        } else {
+            s.yvel = roundVel(std::max(s.yvel, ship::kMinYVelFlipped));
+            s.yvel = roundVel(std::min(s.yvel, ship::kMaxYVelFlipped));
+        }
     }
     // Position integration, exactly as PlayerObject::update does it: the
     // per-tick dy is computed in DOUBLE as f64(f32(dt*0.9f)) * m_yVelocity
@@ -526,6 +597,11 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
                 if (s.upsideDown == target) break;
                 s.upsideDown = target;
                 s.yvel *= pad::kFlipDamp;
+                // flipGravity 0x14039a3cd: m_isOnGround = 0 unconditionally
+                // (a grounded cube that walks into a flip portal cannot
+                // jump until it lands again). Nothing else ship-specific;
+                // the band snap has no post-flip grace.
+                s.onGround = false;
                 s.sinceFlip = 0;
                 break;
             }
@@ -665,81 +741,88 @@ inline void stepCubeSolids(PlayerState& s, const PhysicsConfig& c,
     // passes through top faces while "falling" downward.
 }
 
-// Ship flying band (checkCollisions head: ceiling branch first, then floor).
-// Floor contact zeroes yvel only while yvel <= 0 (hitGround); ceiling
-// contact only while yvel > 0. m_isOnGround is sticky in ship mode: nothing
-// clears it in flight (the real game only clears it on mode switches),
-// which is why traces show onground=1 for the whole flight.
+// Ship flying band (checkCollisions head: ceiling branch first, then floor;
+// see the ship:: notes). hitGround runs only for motion INTO the boundary
+// (ceiling: yvel > 0, floor: yvel < 0), zeroes yvel and grounds the player
+// unless sign*yvel > 5 at entry — so a normal-gravity ship pinned to the
+// ceiling at more than 5 up keeps whatever m_isOnGround it had. Nothing in
+// flight clears the flag (only mode switches and gravity flips do), which
+// is why traces show onground=1 for almost the whole flight.
 inline void stepShipBand(PlayerState& s, const PhysicsConfig& c) {
+    const double sign = s.upsideDown ? -1.0 : 1.0;
     if (s.y > ship::kCeilY) {
         s.y = ship::kCeilY;
-        if (s.yvel > 0.0) s.yvel = 0.0;
+        if (s.yvel > 0.0) {
+            if (!(sign * s.yvel > 5.0)) s.onGround = true;
+            s.yvel = 0.0;
+        }
     } else if (s.y < c.groundY) {
         s.y = c.groundY;
-        if (s.yvel <= 0.0) {
+        if (s.yvel < 0.0) {
+            if (!(sign * s.yvel > 5.0)) s.onGround = true;
             s.yvel = 0.0;
-            s.onGround = true;
         }
     }
 }
 
-// Ship solid phase, from collidedWithObjectInternal. Differences from cube:
-//   - solid tops land with a 6-unit window (cube uses 10) evaluated at both
-//     the current and the pre-movement position, gated on yvel <= 0, and
-//     only when the object is not "overhead" (its bottom above the player
-//     bottom + window). No landing-pattern x snap (checkSnapJumpToObject is
-//     called for the pure cube only).
-//   - solid bottoms are symmetric ceilings: while rising (yvel > 0), an
-//     overhead object whose bottom is within 6 units of the player top
-//     (now or pre-movement) snaps y to bottom - 15 and zeroes yvel.
+// Ship solid phase, from collidedWithObjectInternal (see the ship:: notes
+// for the two blocks). Differences from cube:
+//   - the snap window is 6 units (cube 10), evaluated at both the current
+//     and the pre-movement position; no landing-pattern x snap
+//     (checkSnapJumpToObject is called for the pure cube only).
+//   - solid bottoms are symmetric ceilings: an object whose bottom is within
+//     6 units of the player top (now or pre-movement) snaps y to bottom - 15
+//     while yvel >= 0 and zeroes yvel.
+//   - under flipped gravity the same two blocks run with the roles swapped:
+//     the top snap is a head bump (yvel = 0, m_isOnGround untouched) and
+//     the bottom snap is the landing (m_isOnGround = 1).
 //   - deep overlaps resolve nothing; the inner-box / hazard death rules are
 //     shared with cube.
+// The contact list is collected once at the post-movement position
+// (collisionCheckObjects) and then walked in descending load order with the
+// position updated by each snap, exactly as checkCollisions does — a
+// squeeze between a floor and a ceiling block therefore ends on whichever
+// face the later-loaded object owns.
 inline void stepShipSolids(PlayerState& s, const PhysicsConfig& c,
                            const LevelGeometry& g, float prevY) {
-    double bottomNow = static_cast<double>(s.y - c.half);
-    double bottomPrev = static_cast<double>(prevY - c.half);
-    double topNow = static_cast<double>(s.y + c.half);
-    double topPrev = static_cast<double>(prevY + c.half);
+    const Box* contacts[16];
+    int n = 0;
+    detail::forCandidates(g.solids, s.x, c.half, [&](const Box& b) {
+        if (detail::overlaps(s.x - c.half, s.y - c.half, s.x + c.half,
+                             s.y + c.half, b) && n < 16)
+            contacts[n++] = &b;
+    });
+    for (int i = 1; i < n; ++i)
+        for (int j = i; j > 0 && contacts[j]->order > contacts[j - 1]->order;
+             --j)
+            std::swap(contacts[j], contacts[j - 1]);
     const double w = ship::kSnapWindow;
-    if (s.yvel <= 0.0) {
-        bool found = false;
-        float best = 0.0f;
-        detail::forCandidates(g.solids, s.x, c.half, [&](const Box& b) {
-            if (!detail::overlaps(s.x - c.half, s.y - c.half, s.x + c.half,
-                                  s.y + c.half, b))
-                return;
-            double oTop = static_cast<double>(b.top);
-            double oBot = static_cast<double>(b.bottom);
-            bool landElig = bottomNow + w >= oTop || bottomPrev + w >= oTop;
-            bool overhead = oBot >= bottomNow + w || oBot >= bottomPrev + w;
-            if (landElig && !overhead) {
-                if (!found || b.top > best) best = b.top;
-                found = true;
+    const double bottomPrev = static_cast<double>(prevY - c.half);
+    const double topPrev = static_cast<double>(prevY + c.half);
+    for (int i = 0; i < n; ++i) {
+        const Box& b = *contacts[i];
+        const double oTop = static_cast<double>(b.top);
+        const double oBot = static_cast<double>(b.bottom);
+        const double bottomNow = static_cast<double>(s.y - c.half);
+        const double topNow = static_cast<double>(s.y + c.half);
+        // block 1: the object's top face is within the window under the
+        // player's bottom (world y). A normal-gravity ship lands here; the
+        // upside-down ship bumps its head.
+        if (bottomNow + w >= oTop || bottomPrev + w >= oTop) {
+            if (s.yvel <= 0.0) {
+                s.y = b.top + c.half;
+                s.yvel = 0.0;
+                if (!s.upsideDown) s.onGround = true; // hitGround(obj)
             }
-        });
-        if (found) {
-            s.y = best + c.half;
-            s.yvel = 0.0;
-            s.onGround = true;
+            continue; // handled either way (al = 0): block 2 is skipped
         }
-    } else {
-        bool found = false;
-        float best = 0.0f;
-        detail::forCandidates(g.solids, s.x, c.half, [&](const Box& b) {
-            if (!detail::overlaps(s.x - c.half, s.y - c.half, s.x + c.half,
-                                  s.y + c.half, b))
-                return;
-            double oBot = static_cast<double>(b.bottom);
-            bool overhead = oBot >= bottomNow + w || oBot >= bottomPrev + w;
-            bool headElig = oBot >= topNow - w || oBot >= topPrev - w;
-            if (overhead && headElig) {
-                if (!found || b.bottom < best) best = b.bottom;
-                found = true;
-            }
-        });
-        if (found) {
-            s.y = best - c.half;
+        // block 2: the object's bottom face is within the window above the
+        // player's top. A normal-gravity ship bumps its head; the
+        // upside-down ship lands (its gravity pulls it up).
+        if ((oBot >= topNow - w || oBot >= topPrev - w) && s.yvel >= 0.0) {
+            s.y = b.bottom - c.half;
             s.yvel = 0.0;
+            if (s.upsideDown) s.onGround = true; // hitGround(obj)
         }
     }
 }

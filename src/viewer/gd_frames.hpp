@@ -31,6 +31,8 @@ inline const RenderSpec* renderSpec(int id) {
         {5, {"square_05_001.png"}, 1, Tint::Obj},
         {6, {"square_06_001.png"}, 1, Tint::Obj},
         {7, {"square_07_001.png"}, 1, Tint::Obj},
+        // Jumper: decoration block (engine type 7 like id 5, no hitbox)
+        {73, {"square_c_05_001.png"}, 1, Tint::Obj},
         {8, {"spike_01_001.png"}, 2, Tint::Obj},
         {39, {"spike_02_001.png"}, 2, Tint::Obj},
         {103, {"spike_03_001.png"}, 2, Tint::Obj},

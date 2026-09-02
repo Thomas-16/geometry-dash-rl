@@ -8,8 +8,12 @@
 // flip portals; traces/session9 (Dry Out to 93%) and traces/session10 (a
 // full Base After Base completion) match bit-exactly. Can't Let Go adds
 // the pink jump pad id 140; traces/session13 (a full open-loop completion
-// by the replay mod) matches bit-exactly. Every other entry renders but its
-// sim is unverified, which the GUI labels loudly.
+// by the replay mod) matches bit-exactly. Jumper's only new id 73 is
+// decoration; its upside-down ship comes from the disassembly (physics.hpp
+// ship::) and traces/session14 (a full open-loop completion by the replay
+// mod, 20433 ticks incl. 1381 upside-down ship ticks) matches bit-exactly.
+// Every other entry renders but its sim is unverified, which the GUI labels
+// loudly.
 #pragma once
 
 #include <cstddef>
@@ -30,7 +34,7 @@ inline constexpr LevelInfo kLevels[] = {
     {4, "Dry Out", "DryOut", true},
     {5, "Base After Base", "BaseAfterBase", true},
     {6, "Can't Let Go", "CantLetGo", true},
-    {7, "Jumper", "Jumper", false},
+    {7, "Jumper", "Jumper", true},
     {8, "Time Machine", "TimeMachine", false},
     {9, "Cycles", "Cycles", false},
     {10, "xStep", "xStep", false},

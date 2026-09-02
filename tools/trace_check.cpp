@@ -97,6 +97,19 @@ int checkTrace(const char* path, const gdcore::LevelGeometry& geom,
     bool dbgGeomPrinted = false;
 
     uint64_t matched = 0;
+    // Secondary state that positions alone do not pin down: m_isOnGround and
+    // the post-input yvel. Mismatches are reported (not fatal) so a run that
+    // is position-exact but wrong about the flag still shows up.
+    uint64_t ogMismatch = 0, ogFirst = 0, yvMismatch = 0, yvFirst = 0;
+    auto secondary = [&]() {
+        if (!ogMismatch && !yvMismatch) return std::string();
+        char buf[160];
+        std::snprintf(buf, sizeof buf,
+                      " [onground mismatches: %llu (first tick %llu); yvel mismatches: %llu (first tick %llu)]",
+                      (unsigned long long)ogMismatch, (unsigned long long)ogFirst,
+                      (unsigned long long)yvMismatch, (unsigned long long)yvFirst);
+        return std::string(buf);
+    };
     for (size_t i = 1; i < rows.size(); ++i) {
         const Row& r = rows[i];
         if (dbgTo && r.tick >= dbgFrom && r.tick <= dbgTo) {
@@ -121,9 +134,9 @@ int checkTrace(const char* path, const gdcore::LevelGeometry& geom,
         if (r.realx > maxObjX && r.realx == rows[i - 1].realx && !r.dead) {
             std::printf(
                 "%s: MATCHED all %llu gameplay ticks — LEVEL COMPLETE "
-                "(end sequence from tick %llu, x=%.9g)\n",
+                "(end sequence from tick %llu, x=%.9g)%s\n",
                 path, (unsigned long long)matched,
-                (unsigned long long)r.tick, r.realx);
+                (unsigned long long)r.tick, r.realx, secondary().c_str());
             return 0;
         }
         gdcore::step(s, cfg, geom, r.holding != 0);
@@ -167,15 +180,24 @@ int checkTrace(const char* path, const gdcore::LevelGeometry& geom,
                 (int)s.dead, r.dead, s.x, s.y);
             return 1;
         }
+        if ((s.onGround ? 1 : 0) != r.onground) {
+            if (!ogMismatch) ogFirst = r.tick;
+            ++ogMismatch;
+        }
+        if (s.yvel != r.yvel) {
+            if (!yvMismatch) yvFirst = r.tick;
+            ++yvMismatch;
+        }
         ++matched;
         if (r.dead) {
-            std::printf("%s: MATCHED all %llu ticks incl. death at tick %llu\n",
-                path, (unsigned long long)matched, (unsigned long long)r.tick);
+            std::printf("%s: MATCHED all %llu ticks incl. death at tick %llu%s\n",
+                path, (unsigned long long)matched, (unsigned long long)r.tick,
+                secondary().c_str());
             return 0;
         }
     }
-    std::printf("%s: MATCHED all %llu ticks (no death in trace)\n",
-        path, (unsigned long long)matched);
+    std::printf("%s: MATCHED all %llu ticks (no death in trace)%s\n",
+        path, (unsigned long long)matched, secondary().c_str());
     return 0;
 }
 
