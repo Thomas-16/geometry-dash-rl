@@ -86,9 +86,33 @@ int checkTrace(const char* path, const gdcore::LevelGeometry& geom,
     s.ship = rows[0].ship != 0;
     s.upsideDown = rows[0].upsidedown != 0;
 
+    // GD_TRACE_DEBUG=<from>:<to> prints the sim state for ticks in that
+    // range (before the comparison) plus the solids/hazards within 60 units
+    // of the player's x at the first tick of the window.
+    uint64_t dbgFrom = 0, dbgTo = 0;
+    if (const char* d = std::getenv("GD_TRACE_DEBUG")) {
+        unsigned long long a = 0, b = 0;
+        if (std::sscanf(d, "%llu:%llu", &a, &b) == 2) { dbgFrom = a; dbgTo = b; }
+    }
+    bool dbgGeomPrinted = false;
+
     uint64_t matched = 0;
     for (size_t i = 1; i < rows.size(); ++i) {
         const Row& r = rows[i];
+        if (dbgTo && r.tick >= dbgFrom && r.tick <= dbgTo) {
+            if (!dbgGeomPrinted) {
+                dbgGeomPrinted = true;
+                auto dumpBoxes = [&](const char* name, const std::vector<gdcore::Box>& v) {
+                    for (const auto& b : v)
+                        if (b.right >= s.x - 60.0f && b.left <= s.x + 60.0f)
+                            std::printf("  %s [%.9g,%.9g]x[%.9g,%.9g] order=%d\n",
+                                        name, b.left, b.right, b.bottom, b.top, b.order);
+                };
+                std::printf("geometry near x=%.9g:\n", s.x);
+                dumpBoxes("solid ", geom.solids);
+                dumpBoxes("hazard", geom.hazards);
+            }
+        }
         // Past the level's last object the real game hands the player to the
         // end-of-level auto-walk (observed trigger: last object + ~40 units;
         // physics freezes and yvel stops updating). In gameplay x advances
@@ -103,6 +127,12 @@ int checkTrace(const char* path, const gdcore::LevelGeometry& geom,
             return 0;
         }
         gdcore::step(s, cfg, geom, r.holding != 0);
+        if (dbgTo && r.tick >= dbgFrom && r.tick <= dbgTo)
+            std::printf("t=%llu hold=%d | sim x=%.9g y=%.9g yvel=%.17g og=%d ud=%d hjh=%d dead=%d"
+                        " | real x=%.9g y=%.9g yvel=%.17g og=%d\n",
+                        (unsigned long long)r.tick, r.holding, s.x, s.y, s.yvel,
+                        (int)s.onGround, (int)s.upsideDown, (int)s.hasJustHeld, (int)s.dead,
+                        r.realx, r.realy, r.yvel, r.onground);
         if (s.ship != (r.ship != 0)) {
             std::printf(
                 "%s: MODE MISMATCH at tick %llu after %llu matched ticks: "

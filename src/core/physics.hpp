@@ -79,13 +79,14 @@ namespace gdcore {
 //     next tick's input (GJBaseGameLayer::update: processCommands ->
 //     resetTouchedRings -> ... -> checkCollisions), so a press can still
 //     fire a ring the player overlapped on the previous tick.
-//   - ringJump (type 11 default branch 0x3991fe): m_canJump (+0x9c1) = 0,
-//     yvel = round3(f64(f32(sign) * f32(m_jumpAccel +0x7c0) * sizeMul)) —
-//     the same 11.18 as the ground jump — then activatedByPlayer marks the
-//     ring used for the rest of the attempt (collisionCheckObjects skips
-//     objects whose hasBeenActivatedByPlayer is set). m_isOnGround is NOT
-//     touched, but m_canJump is what the hold re-jump tests, so the sim
-//     clears onGround.
+//   - ringJump (type 11 default branch 0x3991fe): m_isOnGround (+0x9c1;
+//     the bindings layout puts it 33 bytes after m_yVelocity +0x9a0, after
+//     m_isUpsideDown +0x9bf and m_isDead +0x9c0 — earlier notes called this
+//     byte m_canJump) = 0, yvel = round3(f64(f32(sign) * f32(m_jumpAccel
+//     +0x7c0) * sizeMul)) — the same 11.18 as the ground jump — then
+//     activatedByPlayer marks the ring used for the rest of the attempt
+//     (collisionCheckObjects skips objects whose hasBeenActivatedByPlayer
+//     is set).
 struct PhysicsConfig {
     float dx;        // per-tick x advance
     double gravity;  // per-tick yvel decrement (float precision, as double)
@@ -96,6 +97,10 @@ struct PhysicsConfig {
     float half;      // half extent of the solid player box
     float inner;     // half extent of the inner (death) box
     float landClip;  // max depth below a solid top that still lands
+    // m_gravity (+0x7c8) as the pure cube carries it (0.96; every other mode
+    // substitutes the 0.9581990242 constant, see ship::kGrav). Only the
+    // "is falling" test below reads it - the per-tick gravity is `gravity`.
+    double gravityMul = 0.96;
 };
 
 inline PhysicsConfig stereoMadnessCube() {
@@ -315,6 +320,27 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
 inline void checkDeaths(PlayerState& s, const PhysicsConfig& c,
                         const LevelGeometry& g);
 
+// PlayerObject "is falling" helper (win 2.2081 base+0x39a430), for the
+// classic cube (no sideways/swing/platformer flags): normal gravity ->
+// yvel < f64(f32(2 * f32(m_gravity))); flipped -> yvel > 2 * m_gravity (as a
+// double). updateJump's fall path (0x38c27b..0x38c2ae) clears m_isOnGround
+// ONLY when this returns true, evaluated on the yvel BEFORE this tick's
+// gravity is added. The threshold makes the flag asymmetric: a normal cube
+// walking off a ledge is cleared at once (yvel 0 < 1.92), but a flipped cube
+// keeps m_isOnGround - and stays jumpable - for 9 ticks after leaving the
+// underside of a block (yvel 0.216 .. 1.944, cleared once it exceeds 1.92).
+// Seen as onground=1 streaks in every Dry Out / Base After Base trace and
+// as the replay-mod death at BAB tick 15202 (session12): the sim used to
+// drop the flag at the head of every collision pass, so the press that the
+// real game turned into a jump off the slab was a no-op here.
+inline bool cubeIsFalling(const PlayerState& s, const PhysicsConfig& c) {
+    if (!s.upsideDown) {
+        const float g = static_cast<float>(c.gravityMul);
+        return static_cast<double>(g + g) > s.yvel;
+    }
+    return s.yvel > c.gravityMul + c.gravityMul;
+}
+
 // Advance one 1/240s tick. `holding` is the input state processCommands sees
 // at the end of this tick.
 //
@@ -335,9 +361,12 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
             s.onGround = false;
             s.hasJustHeld = false; // updateJump 0x38bbef
         } else {
-            // updateJump fall path (0x14038c2b5): yvel -= f64(sign * f32(g))
-            // then the clamp toward the gravity direction, both through the
-            // 3-decimal rounding.
+            // updateJump fall path: first the m_isOnGround clear, gated on
+            // cubeIsFalling() at the pre-gravity yvel (0x38c27b..0x38c2ae),
+            // then (0x14038c2b5) yvel -= f64(sign * f32(g)) and the clamp
+            // toward the gravity direction, both through the 3-decimal
+            // rounding.
+            if (cubeIsFalling(s, c)) s.onGround = false;
             s.yvel = roundVel(s.yvel - sign * c.gravity);
             if (!s.upsideDown) {
                 if (s.yvel < c.minYVel) s.yvel = c.minYVel;
@@ -369,8 +398,9 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
     // boundary is the floor line; hitGround zeroes yvel and grounds it.
     bool skipObjects = false;
     if (!s.ship) {
-        s.onGround = false; // m_isOnGround is cleared at the head of every
-                            // checkCollisions and re-set by hitGround
+        // m_isOnGround is NOT cleared here: checkCollisions only writes it in
+        // the floor/band snaps and hitGround; the per-tick clear lives in
+        // updateJump's fall path above (cubeIsFalling).
         if (s.y < c.groundY) {
             if (!s.upsideDown) {
                 s.y = c.groundY;
