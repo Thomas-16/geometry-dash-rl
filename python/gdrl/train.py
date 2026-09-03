@@ -140,6 +140,49 @@ def parse_args():
                    help="also enter the polish phase once the det eval "
                         "reaches this fraction of the level (1 = det win; "
                         "0 = off). --polish-wins remains as the other gate")
+    # Planner-in-the-loop. The sim is a perfect model, so a wall the sampler
+    # cannot cross (Cycles x=19681: a saturated flip prior vs ~15 straight
+    # no-flips, ~1e-6 per attempt, 500 updates with zero passes) is a
+    # sub-second macro-action BFS (env/solve.hpp). After every det eval the
+    # solver starts from the det run's OWN states --solve-back..50 units
+    # before its death and searches --solve-reach past it; the segments it
+    # finds go to SIL as demonstrations (fixed minibatch share) and their
+    # states into the respawn bank. Pure exploration stays on: this only
+    # fires where the argmax policy dies.
+    p.add_argument("--wall-solve", type=int, default=1,
+                   help="1 = solve wall demos after each det eval, 0 = off")
+    p.add_argument("--solve-back", type=float, default=700.0,
+                   help="planner starts span [det_x - back, det_x - 50] "
+                        "along the det run (doubles on total failure, "
+                        "up to 8x)")
+    p.add_argument("--solve-reach", type=float, default=800.0,
+                   help="planner target: det_x + reach")
+    p.add_argument("--solve-starts", type=int, default=7)
+    p.add_argument("--solve-stall", type=int, default=3,
+                   help="det evals without a new best before the planner "
+                        "fires (0 = after every eval). PPO clears most "
+                        "walls itself; demos everywhere slowed Stereo "
+                        "Madness (det WIN 179 vs 109-119 updates)")
+    p.add_argument("--solve-nodes", type=int, default=2000000,
+                   help="node budget per planner start (a ship section at "
+                        "4-tick decisions needs ~1.3M per 800 units)")
+    p.add_argument("--sil-demos", type=int, default=4,
+                   help="demo segments replayed per SIL update")
+    p.add_argument("--anchor-coef", type=float, default=0.1,
+                   help="behavior-cloning weight pinning the mastered "
+                        "zone (x < best det_x - margin) to the best det "
+                        "run's own decisions (0 = off): stops the trunk "
+                        "drift that broke level9-2's prefix repeatedly")
+    p.add_argument("--anchor-margin", type=float, default=2.0,
+                   help="hinge margin (logits) the anchor holds on the "
+                        "best det run's decisions")
+    p.add_argument("--det-rollback", type=float, default=0.5,
+                   help="restore ckpt_best_det when det_x stays below this "
+                        "fraction of best_det_x for 2 consecutive evals, "
+                        "or below 0.3x once (0 = off); armed once best "
+                        "det_x >= half the level (early det evals swing "
+                        "4k-12k normally, and a rollback there discards "
+                        "real learning)")
     return p.parse_args()
 
 
@@ -237,6 +280,7 @@ class DetEvaluator:
             a = (logit > 0).to(torch.uint8).cpu().numpy()
             next_d, _, dterm, dtrunc, dinfo = env.step(a)
             if dterm[0] or dtrunc[0]:
+                info["holds"] = env.last_episode_holds(0)
                 self.result = (float(dinfo["final_x"][0]),
                                bool(dinfo["won"][0]), info)
                 return
@@ -244,6 +288,88 @@ class DetEvaluator:
 
     def poll(self, wait: bool = False):
         """The finished (det_x, det_win, snapshot) or None; wait=True joins."""
+        if self.thread is None:
+            return None
+        if wait:
+            self.thread.join()
+        if self.thread.is_alive():
+            return None
+        r, self.result, self.thread = self.result, None, None
+        return r
+
+
+class WallSolver:
+    """Background macro-action BFS (gdenv_solve) from states along a known
+    from-start hold sequence — the det run — toward a target x. Own env
+    handle (the DLL releases the GIL, so the search overlaps the rollout).
+    Result: list of (start blob, holds, start_x, reach_x) demo segments plus
+    (x, blob) snapshots every ~120 units along each, for the respawn bank."""
+
+    def __init__(self, env: GdVecEnv, max_nodes: int):
+        self.env = env
+        self.max_nodes = max_nodes
+        self.thread: threading.Thread | None = None
+        self.result: dict | None = None
+
+    def busy(self) -> bool:
+        return self.thread is not None and self.thread.is_alive()
+
+    def start(self, holds: np.ndarray, xs: list[float], target_x: float,
+              extra_blobs: list[tuple[float, np.ndarray]] = ()) -> None:
+        assert not self.busy()
+        self.result = None
+        self.thread = threading.Thread(
+            target=self._run, args=(np.asarray(holds, np.uint8), list(xs),
+                                    float(target_x), list(extra_blobs)),
+            daemon=True)
+        self.thread.start()
+
+    def _run(self, holds, xs, target_x, extra) -> None:
+        env = self.env
+        t0 = time.perf_counter()
+        starts: list[tuple[float, np.ndarray]] = []
+        if len(holds):
+            for x, b in zip(xs, env.trace_states(holds, xs)):
+                if b is not None:
+                    starts.append((x, b))
+        starts += extra
+        starts = starts[:env.n_envs]
+        out = {"demos": [], "bank": [], "n_starts": len(starts),
+               "target_x": target_x, "reach": 0.0, "secs": 0.0}
+        if not starts:
+            self.result = out
+            return
+        sols, reach = env.solve([b for _, b in starts], target_x,
+                                self.max_nodes)
+        out["reach"] = float(reach.max()) if len(reach) else 0.0
+        ok = [(x, b, h) for (x, b), h in zip(starts, sols) if h is not None]
+        if ok:
+            # Snapshots along each demo: walk them in lockstep on this
+            # handle (set_state + the replayed macro actions).
+            _, acts, _, _, n_steps, _, _ = env.replay(
+                [h for _, _, h in ok], [b for _, b, _ in ok])
+            for i, (x, b, _) in enumerate(ok):
+                env.set_state(i, b)
+            last = np.array([x for x, _, _ in ok])
+            a = np.zeros(env.n_envs, np.uint8)
+            for t in range(int(n_steps.max())):
+                a[:] = 0
+                for i in range(len(ok)):
+                    if t < n_steps[i]:
+                        a[i] = acts[i, t]
+                env.step(a)
+                rs = env.get_render_states()
+                for i in range(len(ok)):
+                    if t < n_steps[i] - 1 and rs[i, 4] == 0.0 \
+                            and rs[i, 0] > last[i] + 120.0:
+                        out["bank"].append((float(rs[i, 0]), env.get_state(i)))
+                        last[i] = rs[i, 0]
+            env.reset()
+            out["demos"] = [(b, h, x, target_x) for x, b, h in ok]
+        out["secs"] = time.perf_counter() - t0
+        self.result = out
+
+    def poll(self, wait: bool = False):
         if self.thread is None:
             return None
         if wait:
@@ -499,11 +625,29 @@ def main():
 
     sil_buf = sil.SILBuffer()
     silu = sil.SIL(model, algo.optimizer, device, args.gamma,
-                   args.reward_scale, coef=args.sil_coef, amp=args.amp)
-    # Replay handle sized to the replay batch: gdenv steps every env in a
-    # handle, so borrowing the 128-env scout would waste 16x the sim work.
-    sil_env = (GdVecEnv(args.level, args.sil_episodes, args.ticks_per_action,
-                        args.end_x) if args.sil_coef > 0 else None)
+                   args.reward_scale, coef=args.sil_coef, amp=args.amp,
+                   anchor_coef=args.anchor_coef,
+                   anchor_margin=args.anchor_margin)
+    # Replay handle sized to the replay batch (episodes + demo segments +
+    # the anchor run): gdenv steps every env in a handle, so borrowing the
+    # 128-env scout would waste 16x the sim work.
+    sil_env = (GdVecEnv(args.level, args.sil_episodes + args.sil_demos + 1,
+                        args.ticks_per_action, args.end_x)
+               if args.sil_coef > 0 else None)
+    # Planner (see --wall-solve) on its own handle; k envs = k parallel
+    # solves and the lockstep walk that snapshots the found segments.
+    kSolveExtra = 3  # banked starts added to the det-path ones
+    solver = (WallSolver(GdVecEnv(args.level,
+                                  max(1, args.solve_starts) + kSolveExtra,
+                                  args.ticks_per_action, args.end_x),
+                         args.solve_nodes)
+              if args.wall_solve else None)
+    solve_back = args.solve_back
+    # Anchor: the best det run's holds and its reach (sil.py).
+    anchor_holds = np.zeros(0, np.uint8)
+    anchor_x = 0.0
+    det_low_count = 0  # consecutive det evals below the rollback fraction
+    det_stall = 0      # consecutive det evals without a new best
 
     # Restore trainer state that isn't the network: exploration coverage,
     # respawn stats, SIL episodes, rng, and the anneal position (without it
@@ -522,6 +666,10 @@ def main():
         respawn_attempts = ckpt.get("respawn_attempts", respawn_attempts)
         respawn_passes = ckpt.get("respawn_passes", respawn_passes)
         det_x_latest = ckpt.get("det_x_latest", 0.0)
+        anchor_holds = np.asarray(ckpt.get("anchor_holds", anchor_holds),
+                                  np.uint8)
+        anchor_x = ckpt.get("anchor_x", anchor_x)
+        solve_back = ckpt.get("solve_back", solve_back)
         if bank:
             print(f"restored bank: {sum(len(v) for v in bank.values())} "
                   f"states, deepest {bank_deepest():.0f}; "
@@ -566,6 +714,9 @@ def main():
                     "respawn_attempts": respawn_attempts,
                     "respawn_passes": respawn_passes,
                     "det_x_latest": det_x_latest,
+                    "anchor_holds": anchor_holds,
+                    "anchor_x": anchor_x,
+                    "solve_back": solve_back,
                     "sil": sil_buf.state_dict(),
                     "config": vars(args)}, path)
 
@@ -586,8 +737,13 @@ def main():
             n_explore = 0
             t_step0 = time.perf_counter()
             buf.reset()
-            # Mastered zone for this update: x < latest det reach - margin.
-            explore_lo = (det_x_latest - args.explore_margin
+            # Mastered zone for this update: x < best det reach - margin.
+            # The BEST run, not the latest: one bad det eval (a single
+            # flipped prefix decision) must not turn the whole level into
+            # the explore zone — measured: xpl 0.00 -> 0.76, prefix deaths
+            # x65/update, two collapse rollbacks. The anchor repairs the
+            # flip; the det rollback below is the backstop.
+            explore_lo = (max(det_x_latest, anchor_x) - args.explore_margin
                           if args.explore_margin >= 0 else -1.0)
             for step_i in range(cfg.rollout_steps):
                 # The env's obs buffer (pinned) is the source of truth: H2D into
@@ -776,8 +932,11 @@ def main():
             t_update = time.perf_counter() - t0
             t0 = time.perf_counter()
             if sil_env is not None:
-                stats.update(silu.update(sil_env, sil_buf, args.sil_episodes,
-                                         rng, cfg.max_grad_norm))
+                stats.update(silu.update(
+                    sil_env, sil_buf, args.sil_episodes, rng,
+                    cfg.max_grad_norm, k_demos=args.sil_demos,
+                    anchor=(anchor_holds, anchor_x),
+                    anchor_x_lo=anchor_x - args.explore_margin))
             sync()
             t_sil = time.perf_counter() - t0
             for d in (respawn_attempts, respawn_passes):
@@ -809,6 +968,50 @@ def main():
             if det_results:
                 det_x, det_win, _ = det_results[-1]
                 det_x_latest = det_x
+            for dx_, dwin_, dsnap in det_results:
+                if dx_ > anchor_x and "holds" in dsnap:
+                    anchor_holds = np.asarray(dsnap["holds"], np.uint8)
+                    anchor_x = dx_
+                det_stall = 0 if dx_ > best_det_x + 30.0 else det_stall + 1
+                # Planner: demos through the wall the argmax policy just
+                # died at, from its own states (plus a few banked ones for
+                # diversity) — once the det reach has stalled. Skipped
+                # while a solve is still running.
+                if (solver is not None and not dwin_ and dx_ > 300.0
+                        and det_stall >= args.solve_stall
+                        and "holds" in dsnap and not solver.busy()):
+                    k = max(1, args.solve_starts)
+                    xs = list(np.linspace(max(dx_ - solve_back, 50.0),
+                                          max(dx_ - 50.0, 60.0), k))
+                    extra = []
+                    for _ in range(kSolveExtra):
+                        pk = bank_pick(dx_ - solve_back, dx_ - 50.0)
+                        if pk is not None:
+                            extra.append(pk)
+                    solver.start(dsnap["holds"], xs,
+                                 min(dx_ + args.solve_reach, env.end_x),
+                                 extra)
+            sol_str = ""
+            sol_res = solver.poll() if solver is not None else None
+            if sol_res is not None:
+                n_new = 0
+                for b, h, sx, tx in sol_res["demos"]:
+                    n_new += int(sil_buf.add_demo(b, h, sx, tx))
+                for bx, blob in sol_res["bank"]:
+                    bank_add(bx, blob)
+                if sol_res["demos"]:
+                    solve_back = args.solve_back
+                else:
+                    solve_back = min(solve_back * 2.0, args.solve_back * 8.0)
+                x0s = [sx for _, _, sx, _ in sol_res["demos"]]
+                sol_str = (f" | WALL {len(sol_res['demos'])}/"
+                           f"{sol_res['n_starts']} demos"
+                           f"{f' from {min(x0s):.0f}-{max(x0s):.0f}' if x0s else ''}"
+                           f" -> {sol_res['target_x']:.0f} (reach "
+                           f"{sol_res['reach']:.0f}, {n_new} new, "
+                           f"{len(sol_res['bank'])} banked, "
+                           f"{sol_res['secs']:.2f}s"
+                           f"{'' if sol_res['demos'] else f', back->{solve_back:.0f}'})")
 
             # Polish gate: cumulative stochastic from-start wins (the
             # original), a forced update, or the det eval reaching
@@ -925,6 +1128,8 @@ def main():
                   f"{samples_s / 1e3:.1f}k dec/s | "
                   f"ent {stats['entropy']:.3f}{det_str}{die_str}"
                   f" | xpl {frac_explore:.2f}"
+                  f"{f' | demos {len(sil_buf.demos)}' if sil_buf.demos else ''}"
+                  f"{sol_str}"
                   f" | {t_roll:.2f}s roll ({t_roll_gpu:.2f} gpu {t_roll_env:.2f} "
                   f"env {t_roll_misc:.2f} misc) {t_update:.2f}s upd"
                   f"{f' {t_sil:.2f}s sil' if sil_env is not None else ''}"
@@ -947,6 +1152,30 @@ def main():
                 print(f"upd {update:4d} | COLLAPSE — rolled back to ckpt_best "
                       f"(mean_x {ckpt.get('mean_final_x', 0):.0f})")
 
+            # Det-eval rollback: the argmax policy is what ships, and its
+            # reach collapsing (level9-2: 12777 -> 2490 while mean_x, over
+            # a handful of from-start episodes, never tripped the gate
+            # above) for 3 consecutive evals means the prefix is gone —
+            # restore the best det snapshot rather than relearn it.
+            if (det_results and args.det_rollback > 0
+                    and best_det_x >= 0.5 * env.end_x):
+                if det_x_latest < args.det_rollback * best_det_x:
+                    det_low_count += 1
+                else:
+                    det_low_count = 0
+                if det_x_latest < 0.3 * best_det_x:
+                    det_low_count = max(det_low_count, 2)
+                best_det_path = run_dir / "ckpt_best_det.pt"
+                if det_low_count >= 2 and best_det_path.exists():
+                    ckpt = torch.load(best_det_path, map_location=device,
+                                      weights_only=False)
+                    model.load_state_dict(ckpt["model"])
+                    algo.optimizer.load_state_dict(ckpt["optimizer"])
+                    det_low_count = 0
+                    det_x_latest = best_det_x
+                    print(f"upd {update:4d} | DET COLLAPSE — rolled back to "
+                          f"ckpt_best_det (det_x {best_det_x:.0f})")
+
             if stop_path.exists():
                 stopped = True
                 stop_path.unlink(missing_ok=True)
@@ -967,6 +1196,9 @@ def main():
     det_env.close()
     if sil_env is not None:
         sil_env.close()
+    if solver is not None:
+        solver.poll(wait=True)
+        solver.env.close()
     scout.close()
     env.close()
 

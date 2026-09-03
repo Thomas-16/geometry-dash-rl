@@ -4,6 +4,7 @@
 #include "core/physics.hpp"
 #include "env/episode.hpp"
 #include "env/obs.hpp"
+#include "env/solve.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -287,7 +288,9 @@ GDENV_API void gdenv_reset_env(GdEnv* env, int32_t i, float* obs_i) {
 GDENV_API int32_t gdenv_replay(GdEnv* env, int32_t k, const uint8_t* holds,
                                const int32_t* lengths, int32_t max_steps,
                                float* obs, uint8_t* acts, float* rews,
-                               float* ticks, int32_t* n_steps) {
+                               float* ticks, int32_t* n_steps,
+                               const uint8_t* start_blobs, float* final_obs,
+                               uint8_t* ends) {
     if (k < 0 || k > static_cast<int32_t>(env->envs.size()) || !holds ||
         !lengths || !n_steps || max_steps < 0 ||
         (max_steps > 0 && (!acts || !rews || !ticks))) {
@@ -304,8 +307,16 @@ GDENV_API int32_t gdenv_replay(GdEnv* env, int32_t k, const uint8_t* holds,
         const int32_t len = lengths[i];
         const size_t row0 = static_cast<size_t>(i) * max_steps;
         e.reset();
+        if (start_blobs) {
+            StateBlob blob;
+            std::memcpy(&blob, start_blobs + static_cast<size_t>(i) * sizeof(blob),
+                        sizeof(blob));
+            e.s = blob.s;
+            e.tick = blob.tick;
+        }
         int32_t t = 0;
         int64_t cursor = 0;
+        uint8_t end = 0;
         while (cursor < len) {
             bool hold = h[cursor] != 0;
             // The macro layer's action is the recorded bit at the decision
@@ -335,11 +346,78 @@ GDENV_API int32_t gdenv_replay(GdEnv* env, int32_t k, const uint8_t* holds,
             }
             ++t;
             cursor += r.ticks;
-            if (r.terminated || r.truncated) break;
+            if (r.terminated) { end = 1; break; }
+            if (r.truncated) { end = 2; break; }
         }
+        if (final_obs)
+            gdenv::buildObs(e.s, env->geom, env->endX, env->cfg.dx,
+                            final_obs + static_cast<size_t>(i) * gdenv::kObsDim);
+        if (ends) ends[i] = end;
         n_steps[i] = t;
         e.reset();
     });
+    return 0;
+}
+
+GDENV_API int32_t gdenv_solve(GdEnv* env, int32_t k, const uint8_t* start_blobs,
+                              const float* target_x, int32_t max_nodes,
+                              uint8_t* holds_out, int32_t cap, int32_t* lens,
+                              float* reach) {
+    if (k < 0 || !start_blobs || !target_x || !holds_out || cap <= 0 || !lens) {
+        g_lastError = "gdenv_solve: bad arguments";
+        return -1;
+    }
+    env->pool->run(k, [&](int i) {
+        StateBlob blob;
+        std::memcpy(&blob, start_blobs + static_cast<size_t>(i) * sizeof(blob),
+                    sizeof(blob));
+        gdenv::SolveResult r = gdenv::solveMacro(
+            blob.s, blob.tick, target_x[i], env->cfg, env->geom, env->ecfg,
+            env->endX, max_nodes > 0 ? max_nodes : 200000);
+        if (reach) reach[i] = r.reachX;
+        if (!r.found || static_cast<int32_t>(r.holds.size()) > cap) {
+            lens[i] = 0;
+            return;
+        }
+        lens[i] = static_cast<int32_t>(r.holds.size());
+        std::memcpy(holds_out + static_cast<size_t>(i) * cap, r.holds.data(),
+                    r.holds.size());
+    });
+    return 0;
+}
+
+GDENV_API int32_t gdenv_trace_states(GdEnv* env, const uint8_t* holds,
+                                     int32_t len, int32_t n, const float* xs,
+                                     uint8_t* blobs_out, uint8_t* found) {
+    if (!holds || len < 0 || n < 0 || !xs || !blobs_out || !found ||
+        env->envs.empty()) {
+        g_lastError = "gdenv_trace_states: bad arguments";
+        return -1;
+    }
+    gdenv::EnvInstance& e = env->envs[0];
+    e.reset();
+    std::memset(found, 0, static_cast<size_t>(n));
+    int32_t j = 0;
+    int64_t cursor = 0;
+    for (;;) {
+        while (j < n && e.s.x >= xs[j]) {
+            StateBlob blob{e.s, e.tick};
+            std::memcpy(blobs_out + static_cast<size_t>(j) * sizeof(blob), &blob,
+                        sizeof(blob));
+            found[j] = 1;
+            ++j;
+        }
+        if (j >= n || cursor >= len) break;
+        bool hold = holds[cursor] != 0;
+        if (!hold && e.s.ball && !e.s.ship && e.s.onGround && e.s.inputHeld &&
+            !e.s.holding && cursor + 1 < len && holds[cursor + 1] != 0)
+            hold = true;
+        gdenv::StepResult r =
+            e.step(hold, env->cfg, env->geom, env->ecfg, env->endX);
+        cursor += r.ticks;
+        if (r.terminated || r.truncated) break;
+    }
+    e.reset();
     return 0;
 }
 

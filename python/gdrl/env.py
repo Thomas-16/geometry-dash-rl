@@ -61,7 +61,14 @@ def _load(dll_path: Path) -> C.CDLL:
     d.gdenv_reset_env.argtypes = [C.c_void_p, C.c_int32, C.c_void_p]
     d.gdenv_replay.restype = C.c_int32
     d.gdenv_replay.argtypes = [C.c_void_p, C.c_int32, u8p, i32p, C.c_int32,
-                               C.c_void_p, u8p, f32p, f32p, i32p]
+                               C.c_void_p, u8p, f32p, f32p, i32p,
+                               C.c_void_p, C.c_void_p, C.c_void_p]
+    d.gdenv_solve.restype = C.c_int32
+    d.gdenv_solve.argtypes = [C.c_void_p, C.c_int32, u8p, f32p, C.c_int32,
+                              u8p, C.c_int32, i32p, f32p]
+    d.gdenv_trace_states.restype = C.c_int32
+    d.gdenv_trace_states.argtypes = [C.c_void_p, u8p, C.c_int32, C.c_int32,
+                                     f32p, u8p, u8p]
     return d
 
 
@@ -184,23 +191,35 @@ class GdVecEnv:
         buffer, so call between step() and consuming that step's obs."""
         self._dll.gdenv_set_state(self._env, i, blob, self._row_ptr[i])
 
-    def replay(self, episodes: list[np.ndarray]):
+    def replay(self, episodes: list[np.ndarray],
+               start_blobs: list[np.ndarray | None] | None = None):
         """Regenerate the decision streams of recorded episodes (per-tick
         hold bits) on envs 0..k-1 in one DLL call each way (count pass, then
-        an exactly-sized fill pass). Returns
-        (obs [k, T, obs_dim], acts [k, T] u8, rews [k, T], ticks [k, T],
-        n_steps [k]) with rows valid for t < n_steps[i]. The envs end reset;
-        the obs buffer for those rows is stale until the next step/reset."""
+        an exactly-sized fill pass). start_blobs[i] (a get_state blob, or
+        None for x=0) makes episode i a segment replayed from that state.
+        Returns (obs [k, T, obs_dim], acts [k, T] u8, rews [k, T],
+        ticks [k, T], n_steps [k], final_obs [k, obs_dim], ends [k] u8)
+        with rows valid for t < n_steps[i]; ends: 0 = holds exhausted alive
+        (bootstrap V(final_obs)), 1 = terminated, 2 = tick cap. The envs end
+        reset; the obs buffer for those rows is stale until the next
+        step/reset."""
         k = len(episodes)
         assert 0 < k <= self.n_envs
         holds = np.ascontiguousarray(np.concatenate(
             [np.asarray(e, np.uint8).reshape(-1) for e in episodes]))
         lengths = np.array([len(e) for e in episodes], np.int32)
         n_steps = np.zeros(k, np.int32)
+        blobs_ptr = None
+        if start_blobs is not None and any(b is not None for b in start_blobs):
+            blobs = np.zeros((k, self.state_size), np.uint8)
+            for i, b in enumerate(start_blobs):
+                blobs[i] = b if b is not None else self.fresh_blob()
+            blobs_ptr = blobs.ctypes.data_as(C.c_void_p)
         empty_u8 = np.zeros(1, np.uint8)
         empty_f32 = np.zeros(1, np.float32)
         if self._dll.gdenv_replay(self._env, k, holds, lengths, 0, None,
-                                  empty_u8, empty_f32, empty_f32, n_steps):
+                                  empty_u8, empty_f32, empty_f32, n_steps,
+                                  blobs_ptr, None, None):
             raise RuntimeError(
                 self._dll.gdenv_last_error().decode(errors="replace"))
         T = int(n_steps.max())
@@ -208,12 +227,67 @@ class GdVecEnv:
         acts = np.zeros((k, T), np.uint8)
         rews = np.zeros((k, T), np.float32)
         ticks = np.zeros((k, T), np.float32)
+        final_obs = np.zeros((k, self.obs_dim), np.float32)
+        ends = np.zeros(k, np.uint8)
         if self._dll.gdenv_replay(self._env, k, holds, lengths, T,
                                   obs.ctypes.data_as(C.c_void_p), acts, rews,
-                                  ticks, n_steps):
+                                  ticks, n_steps, blobs_ptr,
+                                  final_obs.ctypes.data_as(C.c_void_p),
+                                  ends.ctypes.data_as(C.c_void_p)):
             raise RuntimeError(
                 self._dll.gdenv_last_error().decode(errors="replace"))
-        return obs, acts, rews, ticks, n_steps
+        return obs, acts, rews, ticks, n_steps, final_obs, ends
+
+    _fresh: np.ndarray | None = None
+
+    def fresh_blob(self) -> np.ndarray:
+        """State blob of a fresh x=0 episode (cached)."""
+        if self._fresh is None:
+            tmp = np.empty(self.state_size, np.uint8)
+            # Any env's reset state is the same; borrow the last one's
+            # snapshot without disturbing it: reset_env writes the row obs.
+            i = self.n_envs - 1
+            keep = self.get_state(i)
+            self.reset_env(i)
+            self._dll.gdenv_get_state(self._env, i, tmp)
+            self.set_state(i, keep)
+            self._fresh = tmp
+        return self._fresh
+
+    def solve(self, start_blobs: list[np.ndarray], target_x, max_nodes: int = 0,
+              cap: int = 1 << 15):
+        """Macro-action BFS from each start blob to x >= target_x (a scalar
+        or per-start array) on the DLL's thread pool. Returns a list of
+        per-tick hold arrays (None where no path was found within
+        max_nodes; 0 = the DLL default) and the per-start deepest x."""
+        k = len(start_blobs)
+        blobs = np.ascontiguousarray(np.stack(start_blobs).astype(np.uint8))
+        tx = np.ascontiguousarray(
+            np.broadcast_to(np.asarray(target_x, np.float32), (k,)).copy())
+        out = np.zeros((k, cap), np.uint8)
+        lens = np.zeros(k, np.int32)
+        reach = np.zeros(k, np.float32)
+        if self._dll.gdenv_solve(self._env, k, blobs, tx, max_nodes, out, cap,
+                                 lens, reach):
+            raise RuntimeError(
+                self._dll.gdenv_last_error().decode(errors="replace"))
+        return [out[i, :n].copy() if n > 0 else None
+                for i, n in enumerate(lens.tolist())], reach
+
+    def trace_states(self, holds: np.ndarray, xs) -> list[np.ndarray | None]:
+        """State blobs along a from-start hold sequence at the first decision
+        boundary with x >= xs[j] (xs ascending); None where the episode ended
+        first. Uses env slot 0 (left reset)."""
+        h = np.ascontiguousarray(np.asarray(holds, np.uint8).reshape(-1))
+        xs = np.ascontiguousarray(np.asarray(xs, np.float32).reshape(-1))
+        n = len(xs)
+        blobs = np.zeros((n, self.state_size), np.uint8)
+        found = np.zeros(n, np.uint8)
+        if self._dll.gdenv_trace_states(self._env, h, len(h), n, xs, blobs,
+                                        found):
+            raise RuntimeError(
+                self._dll.gdenv_last_error().decode(errors="replace"))
+        return [blobs[j].copy() if found[j] else None for j in range(n)]
 
     def close(self) -> None:
         if self._env:
