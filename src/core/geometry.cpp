@@ -53,11 +53,31 @@ namespace {
 // verified levels. So 73 is decoration like 5 and is deliberately absent
 // from the table below. Jumper's real novelty is gravity portals inside a
 // ship section (x 7565 / 8403 / 9145), handled in physics.hpp.
+//
+// Time Machine (level 8) adds three ids. 141 = pink jump ring: customSetup
+// case 0x140191df1 is the yellow ring's twin (m_objectType 12, +0x3d0 = 1,
+// rect scale +0x394/+0x398 = 1.2f) and the engine reports it EXACTLY like
+// the yellow ring: type 12, m_width/m_height 30x30, rect 36x36 centered
+// (traces/session15/objects.csv, uids 2686/2692). Note the ring_02_001
+// frame is 32x32 in every sheet (31.5 in -hd/-uhd) - the object size is
+// NOT the frame's content size here, so the 1x-sheet rule that holds for
+// pads/blocks does not extend to rings; the first implementation used
+// 38.4x38.4 from the sheet and only the objects.csv dump caught it (the
+// session15 completion matched either way). 45 / 46 = mirror portals: cases 0x1401928af / 0x140192973 set
+// m_objectType 14 / 15 (InverseMirrorPortal / NormalMirrorPortal) with the
+// same field pattern as the gravity portals (no rect scale); their
+// collisionCheckObjects cases only call GJBaseGameLayer::toggleFlipped,
+// which changes m_isFlipped and the camera transition and spawns effects -
+// nothing on the PlayerObject (levelWillFlip 0x38b6d0 touches the streak
+// only) - so they have no entry below: the sim ignores them exactly like
+// the enter-effect triggers (engine: type 14/15, 44x92, 2.2081 objects.csv).
+// 142 (secret coin, type 22, 40x40) is in every classic level and has never
+// collided.
 struct HitboxSpec {
     int id;
     char kind; // 's' solid, 'h' hazard, 'p' yellow pad, 'g' gravity pad,
                // 'n' normal-gravity portal, 'f' flip-gravity portal,
-               // 'r' yellow jump ring, 'k' pink jump pad
+               // 'r' yellow jump ring, 'k' pink jump pad, 'q' pink jump ring
     float w, h;
 };
 
@@ -72,6 +92,7 @@ constexpr HitboxSpec kHitboxes[] = {
     {10, 'n', 25.0f, 75.0f}, {11, 'f', 25.0f, 75.0f},
     {36, 'r', 30.0f * 1.2f, 30.0f * 1.2f},
     {140, 'k', 25.0f, 5.0f},
+    {141, 'q', 30.0f * 1.2f, 30.0f * 1.2f},
 };
 
 const HitboxSpec* findSpec(int id) {
@@ -142,6 +163,9 @@ LevelGeometry LevelGeometry::build(const gd::Level& level) {
             case 'k':
                 g.specials.push_back(
                     Special{b, SpecialKind::PinkPad, padIsFlipped(obj)});
+                break;
+            case 'q':
+                g.specials.push_back(Special{b, SpecialKind::PinkRing, false});
                 break;
         }
     }

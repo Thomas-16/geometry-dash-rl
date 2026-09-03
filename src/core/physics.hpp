@@ -14,7 +14,9 @@ namespace gdcore {
 // Base add nothing beyond the slab id 68 and reachable flip portals; Can't
 // Let Go adds the pink jump pad id 140 — see geometry.cpp and pad::; Jumper
 // adds nothing to the object set but is the first level that flips gravity
-// WHILE FLYING — see the ship:: notes on the upside-down ship).
+// WHILE FLYING — see the ship:: notes on the upside-down ship; Time Machine
+// adds the pink jump ring id 141 — see ring:: — and mirror portals, which
+// are camera-only).
 //
 // Verified bit-exact against traces at float32 position level. The game's
 // internal per-tick order is:
@@ -89,6 +91,14 @@ namespace gdcore {
 //     activatedByPlayer marks the ring used for the rest of the attempt
 //     (collisionCheckObjects skips objects whose hasBeenActivatedByPlayer
 //     is set).
+//   - ring type multiplier (0x14039924f..0x1403993aa, applied to the
+//     f32(m_jumpAccel) value before the sign): type 13 (gravity ring) 0.8,
+//     type 12 (pink ring, Time Machine id 141) 0.37 ship / 0.42 bird /
+//     0.77 ball / 0.72 otherwise (.rdata 0x140622ac4 / ad4 / b94 / b80),
+//     type 11 (yellow) 1.0 unless robot (0.9). Everything else in ringJump
+//     is type-independent for 11 and 12, so the pink ring is the yellow
+//     ring with yvel = round3(f64(f32(sign) * f32(f32(m_jumpAccel) *
+//     0.72f))) = +-8.05 for the cube (4.137 for a ship pressing on it).
 // PlayerObject::m_gravity (+0x7c8) and m_jumpAccel (+0x7c0) are set by
 // PlayerObject::updateTimeMod (win 2.2081 base+0x3a0d50) from the speed:
 // speed 0.9f -> m_jumpAccel 0x40265c2d20000000 (11.18003..., which the
@@ -106,6 +116,17 @@ namespace gdcore {
 // half-thousandth ties after a portal halving round the same way), but the
 // disassembly is unambiguous, so the engine value is used.
 constexpr float kGravity = 0.95819902420043945f; // m_gravity at speed 0.9
+
+namespace ring {
+// m_jumpAccel (+0x7c0) at speed 0.9: 0x40265c2d20000000, exactly
+// representable as a float (ringJump reads it with cvtpd2ps). The
+// 3-decimal setter turns it into 11.18 for the yellow ring / ground jump.
+constexpr double kJumpAccel = 11.180031776428223;
+constexpr float kPinkMulCube = 0.72f;  // .rdata 0x140622b80 (default branch)
+constexpr float kPinkMulShip = 0.37f;  // .rdata 0x140622ac4 (m_isShip)
+constexpr float kPinkMulBird = 0.42f;  // .rdata 0x140622ad4 (m_isBird)
+constexpr float kPinkMulBall = 0.77f;  // .rdata 0x140622b94 (m_isBall)
+} // namespace ring
 
 struct PhysicsConfig {
     float dx;        // per-tick x advance
@@ -367,12 +388,18 @@ inline int pressableRing(const PlayerState& s) {
     return -1;
 }
 
-// PlayerObject::ringJump, yellow ring (type 11) branch.
-inline void fireRing(PlayerState& s, const PhysicsConfig& c, int idx) {
+// PlayerObject::ringJump, yellow (type 11) and pink (type 12) ring branch.
+inline void fireRing(PlayerState& s, const PhysicsConfig& c,
+                     const LevelGeometry& g, int idx) {
+    (void)c;
     const float sign = s.upsideDown ? -1.0f : 1.0f;
-    // 0x3994ef: f32(sign) * f32(m_jumpAccel) * sizeMul (1.0 unless mini),
-    // through the 3-decimal velocity setter.
-    const float v = sign * static_cast<float>(c.jumpVel) * 1.0f;
+    // 0x399237: xmm6 = f32(m_jumpAccel); 0x399298: type 12 scales it by the
+    // mode multiplier (ship / bird / ball / default); 0x3994ef: f32(sign) *
+    // xmm6 * sizeMul (1.0 unless mini), through the 3-decimal setter.
+    float j = static_cast<float>(ring::kJumpAccel);
+    if (g.specials[static_cast<size_t>(idx)].kind == SpecialKind::PinkRing)
+        j *= s.ship ? ring::kPinkMulShip : ring::kPinkMulCube;
+    const float v = sign * j * 1.0f;
     s.yvel = roundVel(static_cast<double>(v));
     s.onGround = false;    // m_canJump cleared (0x39920c)
     s.hasJustHeld = false; // 0x3991ee
@@ -523,7 +550,7 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
         s.hasJustHeld = true;
         const int ring = pressableRing(s);
         if (ring >= 0) {
-            fireRing(s, c, ring);
+            fireRing(s, c, g, ring);
         } else if (!s.ship && s.onGround) {
             s.yvel = sign2 * c.jumpVel;
             s.onGround = false;
@@ -605,7 +632,8 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
                 s.sinceFlip = 0;
                 break;
             }
-            case SpecialKind::YellowRing: {
+            case SpecialKind::YellowRing:
+            case SpecialKind::PinkRing: {
                 if (done) break; // hasBeenActivatedByPlayer: skipped at 0x214a8c
                 // playerTouchedRing: remember the contact, then ringJump,
                 // which fires only for a non-flying player holding an
@@ -616,7 +644,7 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
                     for (int j = 0; j < s.nRingNow; ++j) have |= s.ringNow[j] == i;
                     if (!have) s.ringNow[s.nRingNow++] = i;
                 }
-                if (!s.ship && s.holding && s.hasJustHeld) fireRing(s, c, i);
+                if (!s.ship && s.holding && s.hasJustHeld) fireRing(s, c, g, i);
                 break;
             }
         }

@@ -1,5 +1,6 @@
 // Object-id -> sprite-frame table for the Stereo Madness, Back On Track,
-// Polargeist, Dry Out, Base After Base and Can't Let Go object sets.
+// Polargeist, Dry Out, Base After Base, Can't Let Go, Jumper and Time
+// Machine object sets.
 // Presentation-only viewer data (like the old shape table); NOT hitbox or
 // collision truth. Mapping cross-checked against OpenGD's GameObject table
 // and verified against the GJ_GameSheet-uhd / GJ_GameSheet02-uhd atlases.
@@ -49,6 +50,11 @@ inline const RenderSpec* renderSpec(int id) {
         // Can't Let Go: pink jump pad (bump_03 is the pink 25x5 frame; bump_02
         // is the red pad)
         {140, {"bump_03_001.png"}, 2, Tint::Obj},
+        // Time Machine: mirror portals (45 = mirror on, 46 = mirror off;
+        // camera-only, no hitbox in the sim) and the pink jump ring
+        {45, {"portal_05_back_001.png", "portal_05_front_001.png"}, 3, Tint::Obj},
+        {46, {"portal_06_back_001.png", "portal_06_front_001.png"}, 3, Tint::Obj},
+        {141, {"ring_02_001.png"}, 3, Tint::Obj},
         // Polargeist: yellow jump ring, glow chain
         {36, {"ring_01_001.png"}, 3, Tint::Obj},
         {110, {"d_chain_02_001.png"}, -2, Tint::Glow},

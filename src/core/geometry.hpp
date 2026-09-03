@@ -44,7 +44,15 @@ struct Portal {
 // m_touchingRings and PlayerObject::ringJump (0x398c00) only fires when the
 // player has an unconsumed press (see PlayerState::hasJustHeld). A fired
 // ring is marked activatedByPlayer, so it is one-shot per attempt exactly
-// like a pad.
+// like a pad. The pink ring (Time Machine id 141, type 12) shares the same
+// dispatch (jump table entry 0x140215a32) and the same ringJump path; only
+// the velocity multiplier differs (0x140399298).
+//
+// Mirror portals (Time Machine ids 45/46, types 14/15) are also dispatched
+// here (0x140215723 / 0x140215690) but only call GJBaseGameLayer::
+// toggleFlipped (0x2467d0), which flips the camera (m_isFlipped +0x418 and
+// the +0x41c/+0x420 transition) and plays effects; no PlayerObject physics
+// field is touched, so they are deliberately not part of LevelGeometry.
 enum class SpecialKind : uint8_t {
     YellowPad,      // id 35, type 8: propellPlayer(bumpMod 1.0) -> |yvel| 16
     GravityPad,     // id 67, type 10: propellPlayer(0.8) -> 12.8, then flip
@@ -53,6 +61,9 @@ enum class SpecialKind : uint8_t {
     YellowRing,     // id 36, type 11: ringJump -> yvel = +-jump (11.18)
     PinkPad,        // id 140, type 9: propellPlayer(0.65 cube / 0.35 ship)
                     //   -> |yvel| 10.4 / 5.6 (Can't Let Go)
+    PinkRing,       // id 141, type 12: ringJump with the jump scaled by
+                    //   0.72 cube / 0.37 ship -> |yvel| 8.05 / 4.137
+                    //   (Time Machine); same press/buffer semantics as 36
 };
 
 struct Special {

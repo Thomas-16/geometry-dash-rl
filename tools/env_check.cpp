@@ -13,7 +13,8 @@
 //
 // The level comes from GD_LEVEL_PATH (default Stereo Madness); Back On
 // Track is <install>/Resources/levels/2.txt, Polargeist 3.txt, Dry Out
-// 4.txt, Base After Base 5.txt, Can't Let Go 6.txt.
+// 4.txt, Base After Base 5.txt, Can't Let Go 6.txt, Jumper 7.txt, Time
+// Machine 8.txt.
 #include "core/level.hpp"
 #include "core/physics.hpp"
 #include "env/episode.hpp"

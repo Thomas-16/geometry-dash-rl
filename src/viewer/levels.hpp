@@ -12,8 +12,14 @@
 // decoration; its upside-down ship comes from the disassembly (physics.hpp
 // ship::) and traces/session14 (a full open-loop completion by the replay
 // mod, 20433 ticks incl. 1381 upside-down ship ticks) matches bit-exactly.
-// Every other entry renders but its sim is unverified, which the GUI labels
-// loudly.
+// Time Machine adds the pink jump ring id 141 (ringJump x0.72 -> 8.05,
+// 36x36 box like the yellow ring) and camera-only mirror portals 45/46;
+// traces/session15 (a full open-loop completion by the replay mod, 22714
+// ticks, all four gravity-portal pairs, both ship sections incl. the
+// flipped one, and all six mirror portals) matches bit-exactly, and the
+// replayed BFS solution (attempt_0002, 22717 ticks) fires both pink rings
+// at the sim's exact ticks with yvel +8.05. Every other entry
+// renders but its sim is unverified, which the GUI labels loudly.
 #pragma once
 
 #include <cstddef>
@@ -35,7 +41,7 @@ inline constexpr LevelInfo kLevels[] = {
     {5, "Base After Base", "BaseAfterBase", true},
     {6, "Can't Let Go", "CantLetGo", true},
     {7, "Jumper", "Jumper", true},
-    {8, "Time Machine", "TimeMachine", false},
+    {8, "Time Machine", "TimeMachine", true},
     {9, "Cycles", "Cycles", false},
     {10, "xStep", "xStep", false},
     {11, "Clutterfunk", "Clutterfunk", false},
