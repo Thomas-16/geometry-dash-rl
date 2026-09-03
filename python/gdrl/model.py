@@ -25,6 +25,15 @@ Two deliberate structural choices, both learned from failed runs:
   time (43% at L=8). The trainer therefore keeps L=4 only near the
   frontier and uses a high bound in territory the argmax policy already
   clears; PPO stores each sample's bound so the ratios stay exact.
+  The bound's own gradient d logit/d raw = 1 - tanh^2(raw/L) vanishes once
+  |raw| >> L, and nothing keeps raw small: on the Cycles level9-3 run half
+  of all decisions had |raw| > 8 and the corridor at x 12777 sat at raw
+  -25 (gradient 2.5e-5), so PPO, SIL demonstrations and the entropy bonus
+  were all dead there and the argmax policy needed 990 updates to learn
+  one flip in a 19-decision window. `logit_leak` floors that derivative
+  (backward only: forward values, sampling and PPO ratios are unchanged)
+  so a wrong saturated decision stays trainable: d logit/d raw =
+  max(1 - tanh^2, leak). 0 = the plain tanh bound.
 
 Architectures:
 - "cnn" (default): per-trunk conv encoder over the (2, 24, 32) grid — the
@@ -133,9 +142,10 @@ class _ActorCriticBase(nn.Module):
     """Shared heads/act/evaluate over two separate trunk modules."""
 
     def __init__(self, pi_body: nn.Module, vf_body: nn.Module, feat_dim: int,
-                 logit_bound: float):
+                 logit_bound: float, logit_leak: float = 0.0):
         super().__init__()
         self.logit_bound = logit_bound
+        self.logit_leak = logit_leak
         self.pi_body = pi_body
         self.vf_body = vf_body
         self.policy = _ortho(nn.Linear(feat_dim, 1), 0.01)  # hold logit
@@ -151,7 +161,18 @@ class _ActorCriticBase(nn.Module):
         # Heads + bound in fp32 regardless of the trunk autocast state.
         with torch.autocast(obs.device.type, enabled=False):
             raw = self.policy(pi_feat.float()).squeeze(-1)
-            logit = bound * torch.tanh(raw / bound)
+            y = torch.tanh(raw / bound)
+            logit = bound * y
+            if self.logit_leak > 0.0:
+                # Leaky bound (see the module docstring): raw - raw.detach()
+                # is exactly 0 in value, so this adds nothing to the logit
+                # and adds max(leak - (1 - y^2), 0) to its derivative, i.e.
+                # d logit/d raw = max(1 - y^2, leak). Plain tensor ops, so
+                # torch.compile and the CUDA-graphed act path see no custom
+                # autograd Function.
+                slope = (1.0 - y * y).detach()
+                logit = logit + (raw - raw.detach()) * torch.clamp(
+                    self.logit_leak - slope, min=0.0)
             value = self.value(vf_feat.float()).squeeze(-1)
         return logit, value
 
@@ -178,22 +199,24 @@ class ActorCritic(_ActorCriticBase):
     """Original flat-MLP architecture ("mlp")."""
 
     def __init__(self, obs_dim: int, hidden: tuple[int, int] = (512, 256),
-                 logit_bound: float = 4.0):
+                 logit_bound: float = 4.0, logit_leak: float = 0.0):
         h1, h2 = hidden
         super().__init__(_mlp_trunk(obs_dim, h1, h2),
-                         _mlp_trunk(obs_dim, h1, h2), h2, logit_bound)
+                         _mlp_trunk(obs_dim, h1, h2), h2, logit_bound,
+                         logit_leak)
 
 
 class ConvActorCritic(_ActorCriticBase):
     """Grid-CNN architecture ("cnn")."""
 
-    def __init__(self, obs_dim: int, logit_bound: float = 4.0):
+    def __init__(self, obs_dim: int, logit_bound: float = 4.0,
+                 logit_leak: float = 0.0):
         scalar_dim = obs_dim - GRID_DIM
         if scalar_dim <= 0:
             raise ValueError(f"obs_dim {obs_dim} too small for grid "
                              f"{GRID_DIM} — obs.hpp/model.py mismatch")
         super().__init__(_ConvTrunk(scalar_dim), _ConvTrunk(scalar_dim), 256,
-                         logit_bound)
+                         logit_bound, logit_leak)
         # channels_last conv weights: keys/shapes unchanged, so checkpoints
         # from the NCHW era load as-is.
         self.to(memory_format=torch.channels_last)
@@ -238,12 +261,15 @@ def load_model_state(model: _ActorCriticBase, state: dict,
     return notes
 
 
-def make_model(obs_dim: int, arch: str = "cnn",
-               logit_bound: float = 4.0) -> _ActorCriticBase:
+def make_model(obs_dim: int, arch: str = "cnn", logit_bound: float = 4.0,
+               logit_leak: float = 0.0) -> _ActorCriticBase:
+    """logit_leak matters only for training (backward); inference-only
+    callers (eval, deploy, the rollout snapshot) can leave it at 0."""
     if arch == "cnn":
-        return ConvActorCritic(obs_dim, logit_bound)
+        return ConvActorCritic(obs_dim, logit_bound, logit_leak)
     if arch == "mlp":
-        return ActorCritic(obs_dim, logit_bound=logit_bound)
+        return ActorCritic(obs_dim, logit_bound=logit_bound,
+                           logit_leak=logit_leak)
     raise ValueError(f"unknown arch {arch!r} (expected 'cnn' or 'mlp')")
 
 

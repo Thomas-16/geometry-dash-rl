@@ -113,6 +113,21 @@ class SILBuffer:
             self._keys.discard(b"demo" + b.tobytes() + self._key(h))
         return True
 
+    def prune_demos(self, min_reach_x: float) -> int:
+        """Drop demos that end before min_reach_x (the mastered zone once
+        the frontier moved on): a BFS segment there teaches a different
+        route than the anchored det run, and with the leaky logit bound
+        the policy can actually follow it — level9-4 lost its prefix 3x
+        within ~60 updates of prefix demos. Returns the number dropped."""
+        keep = [d for d in self.demos if d[3] >= min_reach_x]
+        n = len(self.demos) - len(keep)
+        if n:
+            self.demos = keep
+            self._keys = {k for k in self._keys if not k.startswith(b"demo")}
+            self._keys |= {b"demo" + b.tobytes() + self._key(h)
+                           for b, h, _, _ in self.demos}
+        return n
+
     def sample(self, k: int, rng: np.random.Generator) -> list[np.ndarray]:
         """Up to k episodes, wins weighted 3x."""
         items = [(h, 3.0) for h, _ in self.wins] + \

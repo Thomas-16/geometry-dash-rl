@@ -112,6 +112,11 @@ def parse_args():
                         "--mastered-bound. -1 = bound 4 everywhere")
     p.add_argument("--mastered-bound", type=float, default=8.0,
                    help="logit bound in the mastered zone (8 = 0.03% floor)")
+    p.add_argument("--logit-leak", type=float, default=0.1,
+                   help="floor on the tanh bound's derivative (backward "
+                        "only; model.py): level9-3 lost 990 updates at one "
+                        "wall where the raw logit sat at -25 and the plain "
+                        "bound's gradient was 2.5e-5. 0 = plain tanh bound")
     p.add_argument("--mastered-ent", type=float, default=0.1,
                    help="entropy-bonus weight in the mastered zone (1 = "
                         "same as the explore zone). Advantages there are "
@@ -399,7 +404,7 @@ def main():
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         args.arch = ckpt.get("config", {}).get("arch", "mlp")
-    model = make_model(env.obs_dim, args.arch)
+    model = make_model(env.obs_dim, args.arch, logit_leak=args.logit_leak)
     algo = PPO(model, cfg, device)
     buf = RolloutBuffer(cfg.rollout_steps, env.n_envs, env.obs_dim, device)
     recorder = EpisodeRecorder(env)
@@ -976,9 +981,18 @@ def main():
                 # Planner: demos through the wall the argmax policy just
                 # died at, from its own states (plus a few banked ones for
                 # diversity) — once the det reach has stalled. Skipped
-                # while a solve is still running.
+                # while a solve is still running, and skipped when the
+                # death is inside the mastered zone (prefix drift, handled
+                # by the anchor + det rollback): BFS demos through the
+                # prefix take a different route than the anchored det run,
+                # and once the leaky bound let the policy follow them,
+                # level9-4 died in the prefix 3x within ~60 updates of
+                # such demos (vs ~1 per 400 updates otherwise).
+                frontier_lo = (max(best_det_x, anchor_x) - args.explore_margin
+                               if args.explore_margin >= 0 else -np.inf)
                 if (solver is not None and not dwin_ and dx_ > 300.0
                         and det_stall >= args.solve_stall
+                        and dx_ >= frontier_lo
                         and "holds" in dsnap and not solver.busy()):
                     k = max(1, args.solve_starts)
                     xs = list(np.linspace(max(dx_ - solve_back, 50.0),
@@ -991,6 +1005,10 @@ def main():
                     solver.start(dsnap["holds"], xs,
                                  min(dx_ + args.solve_reach, env.end_x),
                                  extra)
+            if det_results and args.explore_margin >= 0:
+                # Demos the frontier has moved past (same reasoning).
+                sil_buf.prune_demos(max(best_det_x, anchor_x)
+                                    - args.explore_margin)
             sol_str = ""
             sol_res = solver.poll() if solver is not None else None
             if sol_res is not None:
