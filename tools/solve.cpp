@@ -57,6 +57,7 @@ Key keyOf(const gdcore::PlayerState& s) {
               (s.upsideDown ? 4u : 0u) | (s.holding ? 8u : 0u) |
               (s.hasJustHeld ? 16u : 0u) |
               (gdcore::pressableRing(s) >= 0 ? 32u : 0u) |
+              (s.ball ? 64u : 0u) | (s.inputHeld ? 128u : 0u) |
               (static_cast<uint32_t>(s.specialDone & 0xffu) << 8);
     return k;
 }

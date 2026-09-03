@@ -52,6 +52,7 @@ void loadSheets(gdv::App& app) {
     const std::filesystem::path& resDir = app.resDir;
     app.atlas.unloadAll();
     app.playerFrame1 = app.playerFrame2 = app.shipFrame1 = app.shipFrame2 = nullptr;
+    app.ballFrame1 = app.ballFrame2 = nullptr;
     app.textured = app.atlas.loadSheet((resDir / "GJ_GameSheet-uhd.plist").string()) &&
                    app.atlas.loadSheet((resDir / "GJ_GameSheet02-uhd.plist").string());
     if (app.textured) {
@@ -77,6 +78,19 @@ void loadSheets(gdv::App& app) {
             app.shipFrame2 = app.atlas.find("ship_01_2_001.png");
         } else {
             TraceLog(LOG_WARNING, "ship icon sheet unavailable — cube-only player");
+        }
+        // Ball icon sheet (default ball, Cycles). Missing sheet just means
+        // the ball sections render the cube sprite.
+        if (app.atlas.loadSheet((resDir / "icons" / "player_ball_01-uhd.plist").string())) {
+            app.ballFrame1 = app.atlas.find("player_ball_01_001.png");
+            app.ballFrame2 = app.atlas.find("player_ball_01_2_001.png");
+            if (app.ballFrame1) {
+                float srcPx = std::max(app.ballFrame1->sourceSize.x,
+                                       app.ballFrame1->sourceSize.y);
+                if (srcPx > 0) app.ballScale = 30.0f / (srcPx * gdv::kUnitsPerPx);
+            }
+        } else {
+            TraceLog(LOG_WARNING, "ball icon sheet unavailable — cube sprite in ball sections");
         }
     } else {
         TraceLog(LOG_WARNING, "atlases unavailable — falling back to shape rendering");

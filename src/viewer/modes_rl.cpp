@@ -21,9 +21,11 @@ const char* const kSpeedLabels[] = {"0.25x", "1x", "2x", "4x", "8x", "32x"};
 
 // Same GD-exact follow as PlayMode::draw, parameterized on the leader.
 void followCamera(const App& app, Camera2D& cam, float& camY, float x, float y,
-                  bool ship, float dt) {
-    if (ship) {
+                  int mode, float dt) {
+    if (mode == 1) {
         camY += (80.0f - camY) * std::min(1.0f, 6.0f * dt);
+    } else if (mode == 2) {
+        camY += (50.0f - camY) * std::min(1.0f, 6.0f * dt); // ball band 240
     } else {
         if (y - camY < 120.0f) camY = y - 120.0f;
         else if (y - camY > 320.0f - 90.0f) camY = y - (320.0f - 90.0f);
@@ -405,7 +407,7 @@ bool TrainingViewMode::poll() {
         snap_.xyv[i * 3 + 1] = rdF32(p + 4);
         snap_.xyv[i * 3 + 2] = rdF32(p + 8);
         uint32_t flags = rdU32(p + 12);
-        snap_.ship[i] = flags & 1;
+        snap_.ship[i] = static_cast<uint8_t>(flags & 0xff); // mode: 0 cube, 1 ship, 2 ball
         snap_.dead[i] = (flags >> 8) & 1;
     }
     snap_.valid = true;
@@ -457,9 +459,9 @@ void TrainingViewMode::draw(const App& app) {
         }
     }
     if (leadX < 0.0f) leadX = snap_.xyv.empty() ? 0.0f : snap_.xyv[leadIdx * 3];
-    bool leadShip = snap_.ship[leadIdx] != 0;
+    const int leadMode = snap_.ship[leadIdx];
     if (follow_)
-        followCamera(app, cam_, camY_, leadX, snap_.xyv[leadIdx * 3 + 1], leadShip,
+        followCamera(app, cam_, camY_, leadX, snap_.xyv[leadIdx * 3 + 1], leadMode,
                      GetFrameTime());
     float colorX = follow_ ? leadX : cam_.target.x;
 
@@ -477,7 +479,8 @@ void TrainingViewMode::draw(const App& app) {
         for (size_t i = 0; i < n; ++i) {
             s.x = snap_.xyv[i * 3];
             s.y = snap_.xyv[i * 3 + 1];
-            s.ship = snap_.ship[i] != 0;
+            s.ship = snap_.ship[i] == 1;
+            s.ball = snap_.ship[i] == 2;
             // The trainer auto-resets on death, so dead=1 snapshots are rare
             // single frames; drawing them red still reads as a death flash
             // when the write rate is high.
@@ -488,7 +491,7 @@ void TrainingViewMode::draw(const App& app) {
                 drawPlayer(app, s, 0.0f, tint_[i], tintDark_[i], 140);
             }
         }
-    }, leadShip ? 390.0f : 0.0f);
+    }, leadMode == 1 ? 390.0f : leadMode == 2 ? 330.0f : 0.0f);
 
     float pct = app.maxX > 0 ? 100.0f * snap_.bestX / app.maxX : 0.0f;
     double gameHours = (double)snap_.globalTicks / 240.0 / 3600.0;

@@ -36,8 +36,14 @@ constexpr int kGridDim = kGridRows * kGridCols;  // per channel
 // portals): distance, dy, kind. Obs v4 (Polargeist): jump rings join the
 // specials list (kind +0.25) and scalars 24-25 are appended — "a press now
 // fires a ring" and "the held press is still unconsumed" (the two bits of
-// PlayerObject state that decide what a click does). Scalars 0-23 and the
-// grid layout are frozen — additions bump kObsVersion and only ever append.
+// PlayerObject state that decide what a click does). Cycles (ball mode)
+// adds new VALUES in existing slots, no layout change: scalar 3 (mode) is
+// -1 for the ball, scalar 7 (next mode portal) +0.5 for a ball portal, and
+// scalar 4 (button) is 0.5 while the physical button is down but
+// m_isHolding is already spent (a ball flip / ball ring consumed it, so a
+// sustained hold is a no-op until a release + press). Levels 1-8 never
+// emit any of these. Scalars 0-23 and the grid layout are frozen —
+// additions bump kObsVersion and only ever append.
 // gdenv_obs_version() exposes this so the Python side can refuse a stale
 // DLL.
 constexpr int kObsVersion = 4;
@@ -97,10 +103,14 @@ inline void buildObs(const gdcore::PlayerState& s,
     out[0] = (s.y - 105.0f) / 300.0f; // 0 on ground, 0.9 at ship ceiling
     out[1] = static_cast<float>(s.yvel / 15.0);
     out[2] = s.onGround ? 1.0f : 0.0f;
-    out[3] = s.ship ? 1.0f : 0.0f;
+    out[3] = s.ship ? 1.0f : s.ball ? -1.0f : 0.0f;
     // Previous input state matters: a fresh click and a sustained hold take
-    // different paths through gdcore::step.
-    out[4] = s.holding ? 1.0f : 0.0f;
+    // different paths through gdcore::step. 1 = button down and
+    // m_isHolding set (a sustained hold: buffered cube re-jump / ball flip
+    // on landing), 0.5 = button down but the press already spent (ball
+    // only: the next action must be a release before a press does
+    // anything), 0 = button up.
+    out[4] = s.inputHeld ? (s.holding ? 1.0f : 0.5f) : 0.0f;
     out[5] = s.x / levelEndX;
     // Next mode portal ahead of the player, to anticipate the yvel-halving
     // mode switch before it enters the grid's coarse cells.
@@ -110,7 +120,9 @@ inline void buildObs(const gdcore::PlayerState& s,
         [](const gdcore::Portal& p, float v) { return p.box.left < v; });
     if (it != g.portals.end() && it->box.left - s.x < kLookahead) {
         portalDist = (it->box.left - s.x) / kLookahead;
-        portalType = it->toShip ? 1.0f : -1.0f;
+        portalType = it->mode == gdcore::PortalMode::Ship   ? 1.0f
+                     : it->mode == gdcore::PortalMode::Ball ? 0.5f
+                                                            : -1.0f;
     }
     out[6] = portalDist;
     out[7] = portalType;
@@ -225,7 +237,9 @@ inline void buildObs(const gdcore::PlayerState& s,
     // tick — PlayerObject::m_touchingRings). [25]: the current hold still
     // carries an unconsumed press, so the next ring contact fires by
     // itself (m_isHolding && m_hasJustHeld). Both are exact engine state,
-    // computable in the Geode mod from PlayerObject fields.
+    // computable in the Geode mod from PlayerObject fields. (The ball's
+    // flip clears both flags, so a ball that flipped reads 0 here even
+    // while the button is held — the engine would not fire a ring either.)
     out[24] = gdcore::pressableRing(s) >= 0 ? 1.0f : 0.0f;
     out[25] = (s.holding && s.hasJustHeld) ? 1.0f : 0.0f;
 

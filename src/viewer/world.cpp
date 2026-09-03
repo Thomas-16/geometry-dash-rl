@@ -92,8 +92,9 @@ void drawObjectShapes(const gd::Object& o) {
                            localToScreen(o, i * 10.f, 5), Color{230, 60, 60, 255});
             break;
         case Shape::Portal: {
-            Color col = (o.id == 13) ? Color{240, 120, 220, 255}   // ship-side
-                                     : Color{110, 240, 110, 255};  // cube-side
+            Color col = (o.id == 13)   ? Color{240, 120, 220, 255}   // ship-side
+                        : (o.id == 47) ? Color{240, 90, 90, 255}     // ball portal
+                                       : Color{110, 240, 110, 255};  // cube-side
             Rectangle r{o.x, -o.y, 16, 85};
             DrawRectanglePro(r, {8, 42.5f}, o.rotation, Fade(col, 0.75f));
             DrawText(TextFormat("%d", o.id), (int)o.x - 8, (int)-o.y - 60, 10, col);
@@ -361,7 +362,9 @@ void drawHitboxes(const App& app, const Camera2D& cam) {
     }
     for (const auto& p : app.geom.portals) {
         Rectangle r = rect(p.box);
-        Color c = p.toShip ? Color{240, 120, 220, 255} : Color{110, 240, 110, 255};
+        Color c = p.mode == gdcore::PortalMode::Ship   ? Color{240, 120, 220, 255}
+                  : p.mode == gdcore::PortalMode::Ball ? Color{240, 90, 90, 255}
+                                                       : Color{110, 240, 110, 255};
         DrawRectangleLinesEx(r, lw, c);
     }
     for (const auto& sp : app.geom.specials) {
@@ -483,8 +486,17 @@ void drawPlayer(const App& app, const gdcore::PlayerState& s, float rotationDeg,
     Vector2 c{s.x, -(s.y - 90.0f)};
     // Upside-down cube: the game mirrors the icon vertically; a half-turn is
     // the same picture for the symmetric default cube (presentation only).
-    if (s.upsideDown && !s.ship) rotationDeg += 180.0f;
-    if (app.useTextures && s.ship && app.shipFrame1) {
+    if (s.upsideDown && !s.ship && !s.ball) rotationDeg += 180.0f;
+    if (app.useTextures && s.ball && app.ballFrame1) {
+        // Ball: the ball icon replaces the cube (PlayerObject::createRobot
+        // -style swap for toggleRollMode); it rolls, so no gravity flip of
+        // the picture. Secondary layer under primary like the cube.
+        if (app.ballFrame2)
+            drawFrameAt(app.atlas, *app.ballFrame2, c, rotationDeg,
+                        app.ballScale, sec);
+        drawFrameAt(app.atlas, *app.ballFrame1, c, rotationDeg,
+                    app.ballScale, pri);
+    } else if (app.useTextures && s.ship && app.shipFrame1) {
         // Ship: the cube rides inside at 0.55 scale, 5 units above center
         // (PlayerObject::createShip), then the ship hull draws over it. Both
         // rotate together around the player center.

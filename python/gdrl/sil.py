@@ -16,7 +16,10 @@ regenerated on demand, never cached — the sim is the experience buffer.
 Replay correctness: at each decision boundary the macro layer's action is
 exactly the recorded hold bit at that tick (a hop macro starts with hold=1,
 walk/air/ship windows hold a constant bit), so feeding holds[cursor] back
-as the action reproduces the original trajectory bit-for-bit. The replay
+as the action reproduces the original trajectory bit-for-bit. The one
+exception - a grounded ball whose press is already spent records a release
+tick before its flip's press - is disambiguated inside gdenv_replay by
+looking one tick ahead. The replay
 itself is one DLL call (`gdenv_replay`, thread-pooled over episodes).
 """
 

@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
                 std::printf("t=%5d x=%9.3f y=%9.4f yvel=%8.3f%s%s%s%s%s%s\n",
                             tick + 1, s.x, s.y, s.yvel,
                             s.onGround ? " ground" : "",
-                            s.ship ? " ship" : "",
+                            s.ship ? " ship" : s.ball ? " ball" : "",
                             s.upsideDown ? " FLIPPED" : "",
                             gdcore::pressableRing(s) >= 0 ? " RING" : "",
                             (s.holding && s.hasJustHeld) ? " armed" : "",

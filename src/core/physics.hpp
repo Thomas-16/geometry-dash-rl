@@ -16,7 +16,8 @@ namespace gdcore {
 // adds nothing to the object set but is the first level that flips gravity
 // WHILE FLYING — see the ship:: notes on the upside-down ship; Time Machine
 // adds the pink jump ring id 141 — see ring:: — and mirror portals, which
-// are camera-only).
+// are camera-only; Cycles adds the ball portal id 47 and with it BALL MODE,
+// see ball::).
 //
 // Verified bit-exact against traces at float32 position level. The game's
 // internal per-tick order is:
@@ -49,7 +50,7 @@ namespace gdcore {
 //     within 10 units (cube) of the object top at the current OR the
 //     pre-movement position (collidedWithObjectInternal, win 0x391a70).
 //   - No head hit for the cube: rising passes through solids freely (the
-//     ship does get a mirrored 6-unit head snap, see stepShipSolids).
+//     ship does get a mirrored 6-unit head snap, see stepFlyingSolids).
 //   - Death on a solid: the inner 9x9 box intersects it. Full-box scraping
 //     is harmless — the player can rise through a block corner with up to
 //     15 units of overlap as long as the inner box never intersects.
@@ -117,6 +118,89 @@ namespace gdcore {
 // disassembly is unambiguous, so the engine value is used.
 constexpr float kGravity = 0.95819902420043945f; // m_gravity at speed 0.9
 
+// Vertical bound (traces/session17, Cycles: a flipped cube that missed the
+// normal portal at x 2733 "fell" upward to y 2791 and the real game killed
+// it there, after the sim had matched 2837 ticks of that flight). The
+// classic cube has no ceiling snap, but GJBaseGameLayer::checkCollisions
+// (0x140213bfe, evaluated for every mode when y >= 105, BEFORE the band
+// snaps and objects) flags position.y > m_maxGameplayY (+0x36a8) + (1 -
+// scale) * h/2, and kills the player (destroyPlayer, 0x14021417d) when the
+// flag was ALSO set on the previous tick (+0xc38 = last tick's flag).
+// GJBaseGameLayer::updateMaxGameplayY (0x23aec0) sets the field to 2790.0f
+// (.rdata 0x140623594) unless a level-settings flag (+0x155 / +0x1cd of the
+// LevelSettingsObject) is set, in which case it is the highest object y +
+// 90 + 300; the classic levels take the constant. The session17 replay
+// died at tick 2838 with y 2791.1 (tick 2837) and 2794.5 (tick 2838).
+constexpr float kMaxGameplayY = 2790.0f;
+
+// Ball mode (Cycles: ball portal id 47, type 16). From the 2.2081
+// disassembly — the ball is NOT a flying mode: updateJump (0x38b900) sends
+// only ship/bird/dart/swing to the flying branch (0x14038bad1), the ball
+// runs the cube's branch with these differences:
+//   - gravity multiplier: xmm7 = 0.6f (.rdata 0x140622b38, 0x14038bb0d;
+//     spider shares it, robot 0.9f) applied as
+//     yvel -= f64(f32(f32(sign * f32(dt*g)) * 0.6f)) (0x14038c2d0..2ed), the
+//     same round3 setter and the same +-15 clamp (0x140623778 / 0x140622ef0)
+//     as the cube; playerIsFallingBugged is the unscaled 2*m_gravity test.
+//   - the "jump" (0x14038bb8a, m_isHolding && m_isOnGround, dashing off):
+//     yvel = round3(f32(sign) * f32(m_jumpAccel) * sizeMul) exactly like the
+//     cube, THEN (0x14038be5f, m_isBall) flipGravity(!m_isUpsideDown,
+//     noEffects) — which halves yvel raw (0x140622d98) and clears
+//     m_isOnGround — then yvel *= f64(0.6f) raw (0x140622db0) and
+//     m_isHolding (+0x985) = 0. So a click on a surface is a gravity flip
+//     with a 11.18 * 0.5 * 0.6 = 3.354 kick toward the NEW gravity, and the
+//     press is consumed: holding the button does not flip again on the next
+//     landing (the real game needs a release + press; the sim therefore
+//     keeps the physical button state, PlayerState::inputHeld, apart from
+//     m_isHolding).
+//   - pushButton (0x397f40): with no touching ring, a ball that is
+//     m_isOnGround calls updateJump(0) immediately (0x140398036), i.e. the
+//     flip happens in the input phase like the cube's click jump; otherwise
+//     the held m_isHolding flips in the movement phase of the first grounded
+//     tick (a buffered flip), exactly the cube's buffered re-jump.
+//   - rings (ringJump 0x3995be): after the yellow/pink ring velocity the
+//     ball multiplies yvel by f64(0.7f) raw (0x140622dd0) and clears
+//     m_isHolding; no gravity flip. Pink ring multiplier 0.77f for the ball.
+//   - pads (propellPlayer 0x14039f8eb): after round3(sign * bumpMod * 16)
+//     the ball multiplies yvel by f64(0.6f) raw (0x140622db0); pink pad
+//     bumpMod 0.7 for the ball (bumpPlayer 0x2179d0).
+//   - checkCollisions (0x2137f0) treats the ball like the flying modes for
+//     the band (sil at 0x1402139e5): ceiling = getGroundHeightForMode(16) =
+//     240 (jump table 0x140211dac: ship/UFO/wave/swing 300, ball 240,
+//     default 270) -> y clamps to [105, 315]. Ceiling (0x140213dea ->
+//     0x140213da1): y = 315, and if yvel > 0 hitGround(null). Floor
+//     (0x140214090 -> 0x140213fff -> 0x1402140fc): y = 105 and hitGround
+//     UNCONDITIONALLY (the yvel < 0 gate at 0x1402140f1 is ship-only, the
+//     swing skips it). hitGround (0x39bf30) zeroes yvel and sets
+//     m_isOnGround unless sign * yvel > 5.0 (0x140622e98) at entry.
+//   - collidedWithObjectInternal: the ball keeps the cube's 10-unit snap
+//     window (0x140391c11 lists only ship/bird/dart/swing for 6.0) but is in
+//     the flying lists for the blocks (0x140392385 flipped block 1,
+//     0x1403928d3 normal block 2), so its solid contacts are the ship's two
+//     blocks with w = 10: normal gravity lands on tops (hitGround) and bumps
+//     its head on bottoms (hitHead, 0x140392f6f: bl = overhead), flipped
+//     gravity bumps on tops (0x140393821 with bl = 1 -> hitHead) and lands
+//     on bottoms (block 2, bl = 0 -> hitGround). checkSnapJumpToObject is
+//     pure-cube only ([rsp+0x36]) so there is no landing-pattern x snap.
+//   - mode portals: the ball portal case (0x1402151b5) calls
+//     toggleFlyMode(0) first (halving yvel only if the player WAS a ship)
+//     then toggleRollMode(1) (0x39b570), which stamps +0x7d8, sets m_isBall
+//     and resets rotation state — no velocity or m_isOnGround change. The
+//     cube portal case likewise ends ball mode via toggleRollMode(0) with
+//     no physics side effect; the ship portal goes through switchedToMode(5)
+//     = toggleFlyMode(1) (halve, m_isOnGround = 0) + toggleRollMode(0).
+//   - flipGravity (0x39a1d0) is mode-independent: yvel *= 0.5 raw,
+//     m_isOnGround = 0 (the ball tail 0x14039a3d4 only resets rotation).
+namespace ball {
+constexpr float kGravMul = 0.6f;                              // 0x140622b38
+constexpr double kFlipKick = static_cast<double>(0.6f);       // 0x140622db0 (f64 0.6000000238)
+constexpr double kRingMul = static_cast<double>(0.7f);        // 0x140622dd0 (f64 0.6999999881)
+constexpr double kPadMul = static_cast<double>(0.6f);         // 0x140622db0
+constexpr float kBandHeight = 240.0f;                         // 0x140623408
+constexpr float kCeilY = 90.0f + kBandHeight - 15.0f;         // 315
+constexpr double kSnapWindow = 10.0;                          // cube window
+} // namespace ball
+
 namespace ring {
 // m_jumpAccel (+0x7c0) at speed 0.9: 0x40265c2d20000000, exactly
 // representable as a float (ringJump reads it with cvtpd2ps). The
@@ -141,6 +225,11 @@ struct PhysicsConfig {
     // m_gravity (+0x7c8): kGravity for every mode at speed 0.9. The
     // playerIsFallingBugged test reads it as a double (2 * m_gravity).
     double gravityMul = static_cast<double>(kGravity);
+    // Ball per-tick gravity: f32(f32(dt * g) * 0.6f) (updateJump
+    // 0x14038c2d0..2de, xmm7 = ball::kGravMul), promoted to double.
+    double ballGravity =
+        static_cast<double>(static_cast<float>((0.25f * 0.9f) * kGravity) *
+                            ball::kGravMul);
 };
 
 inline PhysicsConfig stereoMadnessCube() {
@@ -267,6 +356,7 @@ constexpr float kBase = 16.0f;                  // .rdata 0x1406230f8
 constexpr float kGravityBumpMod = 0.8f;         // .rdata 0x140622ba4
 constexpr float kPinkBumpModCube = 0.65f;       // .rdata 0x140622b5c
 constexpr float kPinkBumpModShip = 0.35f;       // .rdata 0x140622abc
+constexpr float kPinkBumpModBall = 0.7f;        // bumpPlayer 0x140217a6f.. (ball / spider)
 constexpr double kFlipDamp = 0.5;               // .rdata 0x140622d98
 // Upside-down cube below the floor line: checkCollisions snaps it to y=105
 // and skips the rest of the collision pass — unless within 0.1 s of the
@@ -294,15 +384,27 @@ struct PlayerState {
     float y = 105.0f;
     double yvel = 0.0;
     bool onGround = false;
-    bool holding = false; // input state after the last processCommands
+    // m_isHolding (+0x985): set by pushButton, cleared by releaseButton and
+    // by the ball's flip / ring jump (ringJump 0x140399601, updateJump
+    // 0x14038be9d). For the cube and ship it equals the physical button.
+    bool holding = false;
+    // The physical button state after the last processCommands: pushButton
+    // / releaseButton fire on its transitions (the mods call handleButton
+    // only when the wanted state changes). Diverges from `holding` only in
+    // ball mode, where a flip consumes the press while the button stays
+    // down.
+    bool inputHeld = false;
     bool dead = false;
     bool ship = false;
+    bool ball = false;       // m_isBall (+0x9bb): Cycles, see ball::
     bool upsideDown = false; // m_isUpsideDown (gravity flipped)
     // Ticks since the last mode-portal activation (bookkeeping; the ship
     // band snap itself has no post-portal grace — see ship:: notes).
     int sinceSwitch = 1 << 20;
     // Ticks since the last gravity flip (pad::kFlipFloorGraceTicks).
     int sinceFlip = 1 << 20;
+    // +0xc38: last tick's "above kMaxGameplayY" flag (two in a row kill).
+    bool overMaxY = false;
     // Landing-pattern snap state (collidedWithObjectInternal tail, win
     // 0x393d00..0x393fe0): the game remembers the last solid object landed
     // on and the player's x offset to it.
@@ -398,11 +500,19 @@ inline void fireRing(PlayerState& s, const PhysicsConfig& c,
     // xmm6 * sizeMul (1.0 unless mini), through the 3-decimal setter.
     float j = static_cast<float>(ring::kJumpAccel);
     if (g.specials[static_cast<size_t>(idx)].kind == SpecialKind::PinkRing)
-        j *= s.ship ? ring::kPinkMulShip : ring::kPinkMulCube;
+        j *= s.ship ? ring::kPinkMulShip
+             : s.ball ? ring::kPinkMulBall
+                      : ring::kPinkMulCube;
     const float v = sign * j * 1.0f;
     s.yvel = roundVel(static_cast<double>(v));
     s.onGround = false;    // m_canJump cleared (0x39920c)
     s.hasJustHeld = false; // 0x3991ee
+    if (s.ball) {
+        // 0x1403995be..601: m_isBall -> yvel *= f64(0.7f) as a raw double
+        // write, then m_isHolding = 0 (the press is spent, no flip).
+        s.yvel *= ball::kRingMul;
+        s.holding = false;
+    }
     markSpecialDone(s, idx); // activatedByPlayer (0x399cbd)
     removeRing(s.ringNow, s.nRingNow, idx);   // removeObject (0x398e3a)
     removeRing(s.ringPrev, s.nRingPrev, idx);
@@ -411,12 +521,37 @@ inline void fireRing(PlayerState& s, const PhysicsConfig& c,
 inline void stepCubeSolids(PlayerState& s, const PhysicsConfig& c,
                            const LevelGeometry& g, float prevY);
 inline void stepShipBand(PlayerState& s, const PhysicsConfig& c);
-inline void stepShipSolids(PlayerState& s, const PhysicsConfig& c,
-                           const LevelGeometry& g, float prevY);
+inline void stepBallBand(PlayerState& s, const PhysicsConfig& c);
+inline void stepFlyingSolids(PlayerState& s, const PhysicsConfig& c,
+                             const LevelGeometry& g, float prevY, double w);
 inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
                          const LevelGeometry& g);
 inline void checkDeaths(PlayerState& s, const PhysicsConfig& c,
-                        const LevelGeometry& g);
+                        const LevelGeometry& g, float prevY);
+
+// PlayerObject::hitGround (0x39bf30) as far as physics goes: yvel = 0 and
+// m_isOnGround = 1 unless sign * yvel > 5.0 at entry (its r12 gate, .rdata
+// 0x140622e98). hitHead (hitGroundNoJump 0x39bed0) is the same with
+// m_isOnGround saved and restored, i.e. yvel = 0 only.
+inline void hitGround(PlayerState& s) {
+    const double sign = s.upsideDown ? -1.0 : 1.0;
+    if (!(sign * s.yvel > 5.0)) s.onGround = true;
+    s.yvel = 0.0;
+}
+
+// The ball's jump: PlayerObject::updateJump 0x14038be5f — after the cube
+// jump velocity is set, flipGravity(!m_isUpsideDown) (yvel *= 0.5 raw,
+// m_isOnGround = 0, +0x800 stamped), then yvel *= f64(0.6f) raw, then
+// m_isHolding = 0 (the press is spent; +0x7e8 = 0 is the ball-rotation
+// flag).
+inline void ballFlipAfterJump(PlayerState& s) {
+    s.upsideDown = !s.upsideDown;
+    s.yvel *= pad::kFlipDamp;
+    s.onGround = false;
+    s.sinceFlip = 0;
+    s.yvel *= ball::kFlipKick;
+    s.holding = false;
+}
 
 // PlayerObject::playerIsFallingBugged (win 2.2081 base+0x39a430), with no
 // sideways/swing/platformer flags: normal gravity ->
@@ -456,18 +591,21 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
     const double sign = s.upsideDown ? -1.0 : 1.0;
     // movement (sees input state from the previous tick's processCommands)
     if (!s.ship) {
+        // The cube AND the ball run this branch (updateJump sends only the
+        // flying modes to 0x14038c4f7).
         if (s.onGround && s.holding) {
             s.yvel = sign * c.jumpVel;
             s.onGround = false;
             s.hasJustHeld = false; // updateJump 0x38bbef
+            if (s.ball) ballFlipAfterJump(s); // 0x14038be5f
         } else {
             // updateJump fall path: first the m_isOnGround clear, gated on
             // cubeIsFalling() at the pre-gravity yvel (0x38c27b..0x38c2ae),
             // then (0x14038c2b5) yvel -= f64(sign * f32(g)) and the clamp
             // toward the gravity direction, both through the 3-decimal
-            // rounding.
+            // rounding. The ball's gravity is scaled by 0.6f (ball::).
             if (isFallingBugged(s, c)) s.onGround = false;
-            s.yvel = roundVel(s.yvel - sign * c.gravity);
+            s.yvel = roundVel(s.yvel - sign * (s.ball ? c.ballGravity : c.gravity));
             if (!s.upsideDown) {
                 if (s.yvel < c.minYVel) s.yvel = c.minYVel;
             } else {
@@ -503,8 +641,20 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
 
     // 2a. floor / band snap (checkCollisions head). The classic cube's only
     // boundary is the floor line; hitGround zeroes yvel and grounds it.
+    // First the vertical bound (0x140213bfe): position.y above
+    // kMaxGameplayY on two consecutive ticks is a death for every mode,
+    // decided before any object is looked at.
+    if (s.y > kMaxGameplayY) {
+        if (s.overMaxY) {
+            s.dead = true;
+            return;
+        }
+        s.overMaxY = true;
+    } else {
+        s.overMaxY = false;
+    }
     bool skipObjects = false;
-    if (!s.ship) {
+    if (!s.ship && !s.ball) {
         // m_isOnGround is NOT cleared here: checkCollisions only writes it in
         // the floor/band snaps and hitGround; the per-tick clear lives in
         // updateJump's fall path above (cubeIsFalling).
@@ -524,18 +674,21 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
                 skipObjects = true;
             }
         }
-    } else {
+    } else if (s.ship) {
         stepShipBand(s, c);
+    } else {
+        stepBallBand(s, c);
     }
 
     if (!skipObjects) {
         // 2b. activatable objects: pads, gravity portals, mode portals.
         stepSpecials(s, c, g);
         // 2c. solids, with the rules of the (possibly just switched) mode.
-        if (!s.ship) stepCubeSolids(s, c, g, prevY);
-        else stepShipSolids(s, c, g, prevY);
+        if (!s.ship && !s.ball) stepCubeSolids(s, c, g, prevY);
+        else stepFlyingSolids(s, c, g, prevY,
+                              s.ship ? ship::kSnapWindow : ball::kSnapWindow);
         // 2d. hazards / inner-box deaths at the resolved position.
-        checkDeaths(s, c, g);
+        checkDeaths(s, c, g, prevY);
         if (s.dead) return;
     }
 
@@ -545,21 +698,30 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
     // grounded cube jumps immediately. A press in the air with no ring
     // just arms m_hasJustHeld for the next ring contact. Release clears
     // both flags.
-    const double sign2 = s.upsideDown ? -1.0 : 1.0;
-    if (holding && !s.holding) {
-        s.hasJustHeld = true;
+    // pushButton / releaseButton run on transitions of the PHYSICAL button
+    // (inputHeld); m_isHolding (holding) can already be clear while the
+    // button is still down after a ball flip or ball ring jump, and then a
+    // sustained hold is a no-op until the button is released and pressed.
+    if (holding && !s.inputHeld) {
+        s.holding = true;      // pushButton 0x140397fbc: m_isHolding = 1
+        s.hasJustHeld = true;  //                          m_hasJustHeld = 1
         const int ring = pressableRing(s);
         if (ring >= 0) {
             fireRing(s, c, g, ring);
         } else if (!s.ship && s.onGround) {
+            // updateJump(0) from pushButton (0x140398036 ball / 0x14039803f
+            // cube): the same jump path as the movement phase.
+            const double sign2 = s.upsideDown ? -1.0 : 1.0;
             s.yvel = sign2 * c.jumpVel;
             s.onGround = false;
             s.hasJustHeld = false;
+            if (s.ball) ballFlipAfterJump(s);
         }
-    } else if (!holding && s.holding) {
+    } else if (!holding && s.inputHeld) {
+        s.holding = false;     // releaseButton 0x140398260: one 16-bit store
         s.hasJustHeld = false;
     }
-    s.holding = holding;
+    s.inputHeld = holding;
     if (s.sinceSwitch < (1 << 20)) ++s.sinceSwitch;
     if (s.sinceFlip < (1 << 20)) ++s.sinceFlip;
 }
@@ -599,9 +761,14 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
                 if (k < 64) s.specialDone |= uint64_t{1} << k;
                 const float bumpMod =
                     sp.kind == SpecialKind::YellowPad ? 1.0f
-                    : (s.ship ? pad::kPinkBumpModShip : pad::kPinkBumpModCube);
+                    : s.ship ? pad::kPinkBumpModShip
+                    : s.ball ? pad::kPinkBumpModBall
+                             : pad::kPinkBumpModCube;
                 float v = static_cast<float>(sign) * (bumpMod * pad::kBase) * 1.0f;
                 s.yvel = roundVel(static_cast<double>(v));
+                // propellPlayer 0x14039f8eb: ball / spider / swing scale the
+                // result by f64(0.6f) as a raw double write.
+                if (s.ball) s.yvel *= ball::kPadMul;
                 s.onGround = false;
                 break;
             }
@@ -612,6 +779,7 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
                 float v = static_cast<float>(sign) *
                           (pad::kGravityBumpMod * pad::kBase) * 1.0f;
                 s.yvel = roundVel(static_cast<double>(v));
+                if (s.ball) s.yvel *= ball::kPadMul;
                 s.onGround = false;
                 s.upsideDown = target;
                 s.yvel *= pad::kFlipDamp;
@@ -650,18 +818,27 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
         }
     }
 
-    // mode portals: rect overlap with the player's full box. toggleFlyMode
-    // on an actual flag change halves yvel (raw write, no 3-decimal
-    // rounding) and clears onGround.
+    // mode portals: rect overlap with the player's full box. Every mode
+    // portal case runs toggleFlyMode(target == ship) and toggleRollMode
+    // (target == ball) (0x140214e86 cube, 0x140214f61 ship via
+    // switchedToMode(5), 0x1402151b5 ball); toggleFlyMode on an actual flag
+    // change halves yvel (raw write, no 3-decimal rounding) and clears
+    // onGround, toggleRollMode (0x39b570) changes no physics field either
+    // way. So ball <-> cube keeps yvel and m_isOnGround; ship <-> anything
+    // halves and ungrounds.
     detail::forCandidates(g.portals, s.x, c.half, [&](const Portal& p) {
-        if (p.toShip != s.ship &&
-            detail::overlaps(s.x - c.half, s.y - c.half, s.x + c.half,
-                             s.y + c.half, p.box)) {
-            s.ship = p.toShip;
+        if (!detail::overlaps(s.x - c.half, s.y - c.half, s.x + c.half,
+                              s.y + c.half, p.box))
+            return;
+        const bool toShip = p.mode == PortalMode::Ship;
+        const bool toBall = p.mode == PortalMode::Ball;
+        if (s.ship != toShip) {
+            s.ship = toShip;
             s.yvel *= 0.5;
             s.onGround = false;
             s.sinceSwitch = 0;
         }
+        s.ball = toBall;
     }, 86.0f); // a 90-degree portal is 86 wide
 }
 
@@ -793,11 +970,12 @@ inline void stepShipBand(PlayerState& s, const PhysicsConfig& c) {
     }
 }
 
-// Ship solid phase, from collidedWithObjectInternal (see the ship:: notes
-// for the two blocks). Differences from cube:
-//   - the snap window is 6 units (cube 10), evaluated at both the current
-//     and the pre-movement position; no landing-pattern x snap
-//     (checkSnapJumpToObject is called for the pure cube only).
+// Ship / ball solid phase, from collidedWithObjectInternal (see the ship::
+// notes for the two blocks; the ball takes the same two blocks with the
+// cube's 10-unit window, see ball::). Differences from cube:
+//   - the snap window is 6 units for the ship (10 for the ball), evaluated
+//     at both the current and the pre-movement position; no landing-pattern
+//     x snap (checkSnapJumpToObject is called for the pure cube only).
 //   - solid bottoms are symmetric ceilings: an object whose bottom is within
 //     6 units of the player top (now or pre-movement) snaps y to bottom - 15
 //     while yvel >= 0 and zeroes yvel.
@@ -811,8 +989,8 @@ inline void stepShipBand(PlayerState& s, const PhysicsConfig& c) {
 // position updated by each snap, exactly as checkCollisions does — a
 // squeeze between a floor and a ceiling block therefore ends on whichever
 // face the later-loaded object owns.
-inline void stepShipSolids(PlayerState& s, const PhysicsConfig& c,
-                           const LevelGeometry& g, float prevY) {
+inline void stepFlyingSolids(PlayerState& s, const PhysicsConfig& c,
+                             const LevelGeometry& g, float prevY, double w) {
     const Box* contacts[16];
     int n = 0;
     detail::forCandidates(g.solids, s.x, c.half, [&](const Box& b) {
@@ -824,7 +1002,6 @@ inline void stepShipSolids(PlayerState& s, const PhysicsConfig& c,
         for (int j = i; j > 0 && contacts[j]->order > contacts[j - 1]->order;
              --j)
             std::swap(contacts[j], contacts[j - 1]);
-    const double w = ship::kSnapWindow;
     const double bottomPrev = static_cast<double>(prevY - c.half);
     const double topPrev = static_cast<double>(prevY + c.half);
     for (int i = 0; i < n; ++i) {
@@ -839,8 +1016,11 @@ inline void stepShipSolids(PlayerState& s, const PhysicsConfig& c,
         if (bottomNow + w >= oTop || bottomPrev + w >= oTop) {
             if (s.yvel <= 0.0) {
                 s.y = b.top + c.half;
+                // 0x140393913: bl (the block-1 window flag) picks hitHead
+                // for the flipped modes, hitGround(obj) otherwise; with
+                // yvel <= 0 the latter's sign*yvel > 5 gate never fires.
                 s.yvel = 0.0;
-                if (!s.upsideDown) s.onGround = true; // hitGround(obj)
+                if (!s.upsideDown) s.onGround = true;
             }
             continue; // handled either way (al = 0): block 2 is skipped
         }
@@ -849,20 +1029,73 @@ inline void stepShipSolids(PlayerState& s, const PhysicsConfig& c,
         // upside-down ship lands (its gravity pulls it up).
         if ((oBot >= topNow - w || oBot >= topPrev - w) && s.yvel >= 0.0) {
             s.y = b.bottom - c.half;
+            // 0x140392fcf: bl = overhead (normal gravity) -> hitHead; the
+            // flipped modes land here with hitGround(obj), whose gate
+            // sign*yvel > 5 is -yvel > 5, impossible with yvel >= 0.
             s.yvel = 0.0;
-            if (s.upsideDown) s.onGround = true; // hitGround(obj)
+            if (s.upsideDown) s.onGround = true;
         }
     }
 }
 
+// Ball band (checkCollisions head, the sil path with the ball flag set):
+// ceiling at getGroundHeightForMode(16) = floor + 240 (0x140211da1 ->
+// .rdata 0x140623408), floor at 90. Ceiling branch (0x140213dea ->
+// 0x140213da1 -> 0x140213e31): y = 315, then hitGround(null) only if
+// yvel > 0. Floor branch (0x140214090 -> 0x140213fff -> 0x1402140fc): y =
+// 105, then hitGround(null) unconditionally (the yvel < 0 test at
+// 0x1402140f1 is reached only by the ship; the swing skips both). Neither
+// snap has a post-portal grace (r12 = ceiling-height-changed is 0 in a
+// plain level).
+inline void stepBallBand(PlayerState& s, const PhysicsConfig& c) {
+    if (s.y > ball::kCeilY) {
+        s.y = ball::kCeilY;
+        if (s.yvel > 0.0) hitGround(s);
+    } else if (s.y < c.groundY) {
+        s.y = c.groundY;
+        hitGround(s);
+    }
+}
+
 // Deaths, evaluated at the resolved position: inner 9x9 box against solids,
-// full 30x30 box against hazards. Shared by cube and ship.
+// full 30x30 box against hazards. Shared by every mode.
+//
+// collidedWithObjectInternal's inner-box death (0x140393622..) has one
+// escape (0x140393675..0x14039372a): within 0.1 s of a gravity flip
+// (m_totalTime - [+0x800] < 0.1, .rdata 0x140622cf0) an object whose
+// block-window flag bl is set is snapped instead of killing — normal
+// gravity: y = objBottom - 15 (bl = overhead: objBottom >= playerBottom +
+// w, now or pre-movement), flipped: y = objTop + 15 (bl = playerBottom + w
+// >= objTop, now or pre-movement) — followed by hitGround(obj, 1). Only a
+// deep side-on overlap right after a flip reaches it (a face within the
+// window would have snapped in the blocks already); modeled here from the
+// disassembly, no trace has exercised it. w is the mode's snap window.
 inline void checkDeaths(PlayerState& s, const PhysicsConfig& c,
-                        const LevelGeometry& g) {
+                        const LevelGeometry& g, float prevY) {
+    const double w = s.ship ? ship::kSnapWindow : static_cast<double>(c.landClip);
+    const bool flipGrace = s.sinceFlip < pad::kFlipFloorGraceTicks;
     detail::forCandidates(g.solids, s.x, c.inner, [&](const Box& b) {
-        if (detail::overlaps(s.x - c.inner, s.y - c.inner, s.x + c.inner,
-                             s.y + c.inner, b))
-            s.dead = true;
+        if (s.dead) return;
+        if (!detail::overlaps(s.x - c.inner, s.y - c.inner, s.x + c.inner,
+                              s.y + c.inner, b))
+            return;
+        if (flipGrace) {
+            const double bottomNow = static_cast<double>(s.y - c.half);
+            const double bottomPrev = static_cast<double>(prevY - c.half);
+            const double oTop = static_cast<double>(b.top);
+            const double oBot = static_cast<double>(b.bottom);
+            bool bl;
+            if (!s.upsideDown)
+                bl = oBot >= bottomNow + w || oBot >= bottomPrev + w;
+            else
+                bl = bottomNow + w >= oTop || bottomPrev + w >= oTop;
+            if (bl) {
+                s.y = s.upsideDown ? b.top + c.half : b.bottom - c.half;
+                hitGround(s);
+                return;
+            }
+        }
+        s.dead = true;
     });
     detail::forCandidates(g.hazards, s.x, c.half, [&](const Box& b) {
         if (detail::overlaps(s.x - c.half, s.y - c.half, s.x + c.half,

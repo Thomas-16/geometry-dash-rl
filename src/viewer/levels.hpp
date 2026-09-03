@@ -18,7 +18,11 @@
 // ticks, all four gravity-portal pairs, both ship sections incl. the
 // flipped one, and all six mirror portals) matches bit-exactly, and the
 // replayed BFS solution (attempt_0002, 22717 ticks) fires both pink rings
-// at the sim's exact ticks with yvel +8.05. Every other entry
+// at the sim's exact ticks with yvel +8.05. Cycles adds the ball portal id
+// 47 and ball mode (physics.hpp ball::); traces/session16 attempt_0002 (a
+// human run through the whole first ball section, 3398 ball ticks with 18
+// flips, three rings, the in-section flip portal and pad, ending in a ship
+// death at x 13738) matches bit-exactly. Every other entry
 // renders but its sim is unverified, which the GUI labels loudly.
 #pragma once
 
@@ -42,7 +46,7 @@ inline constexpr LevelInfo kLevels[] = {
     {6, "Can't Let Go", "CantLetGo", true},
     {7, "Jumper", "Jumper", true},
     {8, "Time Machine", "TimeMachine", true},
-    {9, "Cycles", "Cycles", false},
+    {9, "Cycles", "Cycles", true},
     {10, "xStep", "xStep", false},
     {11, "Clutterfunk", "Clutterfunk", false},
     {12, "Theory of Everything", "TheoryOfEverything", false},

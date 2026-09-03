@@ -73,6 +73,15 @@ namespace {
 // the enter-effect triggers (engine: type 14/15, 44x92, 2.2081 objects.csv).
 // 142 (secret coin, type 22, 40x40) is in every classic level and has never
 // collided.
+//
+// Cycles (level 9) adds two ids: 25 (another enter-effect trigger, case 9
+// like 22/24/26, no collision) and 47 = the BALL PORTAL: customSetup case
+// 0x1401929d6 sets m_objectType 16 (BallPortal) with exactly the mode-portal
+// field pattern of 12/13 (cases 0x1401927e9 / 0x14019284c: +0x420 = 10,
+// +0x464 = 5, +0x468/+0x424 = 1, the (-5, 0) +0x334 offset, the same sprite
+// helper 0x140198b20 on a same-sized frame), so it is handled with the mode
+// portals (34x86) rather than in the table below. The mechanic itself -
+// ball mode - lives in physics.hpp (ball::).
 struct HitboxSpec {
     int id;
     char kind; // 's' solid, 'h' hazard, 'p' yellow pad, 'g' gravity pad,
@@ -124,7 +133,7 @@ LevelGeometry LevelGeometry::build(const gd::Level& level) {
     int order = 0;
     for (const auto& obj : level.objects) {
         ++order;
-        bool portal = obj.id == 12 || obj.id == 13;
+        bool portal = obj.id == 12 || obj.id == 13 || obj.id == 47;
         const HitboxSpec* spec = findSpec(obj.id);
         if (!spec && !portal) continue;
         float w = portal ? 34.0f : spec->w;
@@ -137,7 +146,10 @@ LevelGeometry LevelGeometry::build(const gd::Level& level) {
         Box b{cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f,
               order};
         if (portal) {
-            g.portals.push_back(Portal{b, obj.id == 13});
+            PortalMode mode = obj.id == 13   ? PortalMode::Ship
+                              : obj.id == 47 ? PortalMode::Ball
+                                             : PortalMode::Cube;
+            g.portals.push_back(Portal{b, mode});
             continue;
         }
         switch (spec->kind) {

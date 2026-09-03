@@ -43,8 +43,9 @@ class LiveWriter:
         self._mm[8:12] = struct.pack("<I", self._seq)
         rec = self._rec
         rec[:, :3] = render_states[:, :3]
-        # pack ship/dead bytes into the fourth f32 slot
-        flags = (render_states[:, 3] > 0).astype(np.uint32) | \
+        # pack mode (0 cube, 1 ship, 2 ball) / dead bytes into the fourth
+        # f32 slot
+        flags = (render_states[:, 3].astype(np.uint32) & 0xFF) | \
                 ((render_states[:, 4] > 0).astype(np.uint32) << 8)
         rec[:, 3] = flags.view(np.float32)
         self._mm[HEADER.size:] = rec.tobytes()

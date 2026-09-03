@@ -249,7 +249,7 @@ GDENV_API void gdenv_get_render_states(const GdEnv* env, float* out) {
         row[0] = s.x;
         row[1] = s.y;
         row[2] = static_cast<float>(s.yvel);
-        row[3] = s.ship ? 1.0f : 0.0f;
+        row[3] = s.ship ? 1.0f : s.ball ? 2.0f : 0.0f; // mode: 0 cube, 1 ship, 2 ball
         row[4] = s.dead ? 1.0f : 0.0f;
     }
 }
@@ -307,7 +307,18 @@ GDENV_API int32_t gdenv_replay(GdEnv* env, int32_t k, const uint8_t* holds,
         int32_t t = 0;
         int64_t cursor = 0;
         while (cursor < len) {
-            const bool hold = h[cursor] != 0;
+            bool hold = h[cursor] != 0;
+            // The macro layer's action is the recorded bit at the decision
+            // tick, with one exception: a grounded ball whose press is
+            // already spent (button down, m_isHolding clear) records a
+            // release tick before the flip's press, so [0, 1] at such a
+            // decision is action 1 (a walk from that state records four
+            // zeros). Never observed in training episodes, but SIL's replay
+            // must not diverge if it happens.
+            if (!hold && e.s.ball && !e.s.ship && e.s.onGround &&
+                e.s.inputHeld && !e.s.holding && cursor + 1 < len &&
+                h[cursor + 1] != 0)
+                hold = true;
             const bool rec = t < max_steps;
             const size_t row = row0 + t;
             if (rec) {

@@ -120,7 +120,8 @@ void logRow(uint8_t src, PlayerObject* p, float dt, bool halfTick, bool lastTick
         (uint8_t)g_tracer.holding,
         (uint8_t)p->m_isOnGround,
         (uint8_t)p->m_isUpsideDown,
-        (uint8_t)p->m_isShip,
+        // mode column ("ship" in the header): 0 cube, 1 ship, 2 ball
+        (uint8_t)(p->m_isShip ? 1 : (p->m_isBall ? 2 : 0)),
         (uint8_t)p->m_isDead,
         p->m_playerSpeed,
         dt,

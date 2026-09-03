@@ -41,6 +41,8 @@ inline const RenderSpec* renderSpec(int id) {
         {9, {"pit_01_001.png"}, 2, Tint::Black},
         {12, {"portal_03_back_001.png", "portal_03_front_001.png"}, 3, Tint::Obj},
         {13, {"portal_04_back_001.png", "portal_04_front_001.png"}, 3, Tint::Obj},
+        // Cycles: ball portal (engine type 16, 34x86 like the other mode portals)
+        {47, {"portal_07_back_001.png", "portal_07_front_001.png"}, 3, Tint::Obj},
         // Back On Track: gravity portals (10 blue = normal, 11 yellow = flip),
         // yellow jump pad, blue gravity pad
         {10, {"portal_01_back_001.png", "portal_01_front_001.png"}, 3, Tint::Obj},

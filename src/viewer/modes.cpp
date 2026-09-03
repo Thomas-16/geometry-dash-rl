@@ -80,6 +80,7 @@ void PlayMode::resetAttempt(App& app) {
     tick_ = 0;
     cubeRot_ = 0.0f;
     shipRot_ = 0.0f;
+    ballRot_ = 0.0f;
     deathTimer_ = 0.0f;
     camY_ = 0.0f;
     holds_.clear();
@@ -127,6 +128,15 @@ void PlayMode::stepTick(App& app, bool hold) {
         shipRot_ += (target - shipRot_) * 0.15f;
     } else {
         shipRot_ = 0.0f;
+    }
+    if (player_.ball) {
+        // Cosmetic roll: one turn per circumference of a 15-unit ball,
+        // direction by gravity (the real runBallRotation eases; close
+        // enough for a viewer).
+        ballRot_ += (player_.upsideDown ? -1.0f : 1.0f) * cfg_.dx *
+                    (360.0f / (2.0f * 3.14159265f * 15.0f));
+    } else {
+        ballRot_ = 0.0f;
     }
     // Real completion trigger: the session6 full-run trace shows normal
     // physics ending at last-object + ~40 units (x froze at +40.49; the
@@ -210,10 +220,12 @@ void PlayMode::draw(const App& app) {
     // below the camera top, and never sinks below the ground (camY >= 0).
     // camY_ is the engine y of the screen bottom; ground top (engine 90) sits
     // 90 units above it at rest.
-    if (player_.ship) {
+    if (player_.ship || player_.ball) {
         // Ship band: floor 90 / ceiling 390 both on screen; ease the camera
-        // toward the band centered vertically (80 = 90 - (320-300)/2).
-        camY_ += (80.0f - camY_) * std::min(1.0f, 6.0f * GetFrameTime());
+        // toward the band centered vertically (80 = 90 - (320-300)/2). The
+        // ball band is 240 tall (ceiling 330): 50 = 90 - (320-240)/2.
+        const float bandCam = player_.ship ? 80.0f : 50.0f;
+        camY_ += (bandCam - camY_) * std::min(1.0f, 6.0f * GetFrameTime());
     } else {
         if (player_.y - camY_ < 120.0f) camY_ = player_.y - 120.0f;
         else if (player_.y - camY_ > 320.0f - 90.0f) camY_ = player_.y - (320.0f - 90.0f);
@@ -227,8 +239,9 @@ void PlayMode::draw(const App& app) {
 
     drawBackground(app, player_.x);
     drawWorld(app, cam_, player_.x,
-              [&] { drawPlayer(app, player_, player_.ship ? shipRot_ : cubeRot_); },
-              player_.ship ? 390.0f : 0.0f);
+              [&] { drawPlayer(app, player_, player_.ship ? shipRot_
+                                                  : player_.ball ? ballRot_ : cubeRot_); },
+              player_.ship ? 390.0f : player_.ball ? 330.0f : 0.0f);
 
     float progress = app.maxX > 0 ? std::min(1.0f, player_.x / app.maxX) : 0.0f;
     DrawText(TextFormat("Attempt %d   x: %.0f / %.0f  (%d%%)   tick %lld   %d fps%s%s",
@@ -279,7 +292,9 @@ void PlayMode::drawPanel(App& app) {
     ImGui::Text("attempt %d   x %.1f (%.1f%%)   tick %lld", attempt_, player_.x,
                 progress * 100.0f, tick_);
     ImGui::Text("y %.2f  yvel %.3f  %s%s%s", player_.y, player_.yvel,
-                player_.ship ? "ship" : (player_.upsideDown ? "cube (flipped)" : "cube"),
+                player_.ship ? (player_.upsideDown ? "ship (flipped)" : "ship")
+                : player_.ball ? (player_.upsideDown ? "ball (flipped)" : "ball")
+                               : (player_.upsideDown ? "cube (flipped)" : "cube"),
                 player_.onGround ? "  ground" : "",
                 player_.dead ? "  DEAD" : "");
     if (ImGui::Button("Restart")) { attempt_ = 1; won_ = false; setPaused(app, false); resetAttempt(app); }

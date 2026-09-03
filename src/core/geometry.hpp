@@ -22,12 +22,20 @@ struct Box {
 // engine-extracted hitbox table (traces/session2/objects.csv, GD 2.2081).
 // Boxes are centered on the object position; rotation by an odd multiple of
 // 90 degrees swaps width/height; flips never change the box.
-// Mode portal (ship 13 / cube 12). Engine hitbox is 34x86 centered on the
-// object position (GameObject::getObjectRect from the trace-logger dump);
-// activation is plain rect overlap with the player's 30x30 box.
+// Mode portal (cube 12 / ship 13 / ball 47). Engine hitbox is 34x86
+// centered on the object position (GameObject::getObjectRect from the
+// trace-logger dump for 12/13; 47's customSetup case 0x1401929d6 is the
+// same portal pattern - type 16, the +0x334 (-5,0) offset, the same sprite
+// helper 0x140198b20 - and its portal_07 frames have exactly the portal_03
+// / portal_04 sizes in every sheet, so it is 34x86 too; confirm against the
+// Cycles objects.csv dump). Activation is plain rect overlap with the
+// player's 30x30 box (collisionCheckObjects types 5 / 6 / 16, all gated by
+// canBeActivatedByPlayer).
+enum class PortalMode : uint8_t { Cube, Ship, Ball };
+
 struct Portal {
     Box box;
-    bool toShip;
+    PortalMode mode;
 };
 
 // Activatable objects handled inside GJBaseGameLayer::collisionCheckObjects

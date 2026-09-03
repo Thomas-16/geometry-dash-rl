@@ -74,6 +74,7 @@ private:
     bool stepOnce_ = false;
     float cubeRot_ = 0.0f;     // cosmetic-only spin, never physics
     float shipRot_ = 0.0f;     // cosmetic ship tilt (updateShipRotation-style)
+    float ballRot_ = 0.0f;     // cosmetic ball roll (runBallRotation-style)
     std::vector<uint8_t> holds_;  // per-tick input of the current attempt
     std::string status_;          // last save result shown in the panel
 };

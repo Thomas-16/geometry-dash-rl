@@ -83,7 +83,11 @@ int checkTrace(const char* path, const gdcore::LevelGeometry& geom,
     s.yvel = rows[0].yvel;
     s.onGround = rows[0].onground != 0;
     s.holding = rows[0].holding != 0;
-    s.ship = rows[0].ship != 0;
+    s.inputHeld = s.holding;
+    // The `ship` column is the mode: 0 cube, 1 ship, 2 ball (trace-logger /
+    // replay-mod builds from 2026-09-02 on; older traces only have 0/1).
+    s.ship = rows[0].ship == 1;
+    s.ball = rows[0].ship == 2;
     s.upsideDown = rows[0].upsidedown != 0;
 
     // GD_TRACE_DEBUG=<from>:<to> prints the sim state for ticks in that
@@ -141,17 +145,20 @@ int checkTrace(const char* path, const gdcore::LevelGeometry& geom,
         }
         gdcore::step(s, cfg, geom, r.holding != 0);
         if (dbgTo && r.tick >= dbgFrom && r.tick <= dbgTo)
-            std::printf("t=%llu hold=%d | sim x=%.9g y=%.9g yvel=%.17g og=%d ud=%d hjh=%d dead=%d"
+            std::printf("t=%llu hold=%d | sim x=%.9g y=%.9g yvel=%.17g og=%d ud=%d hjh=%d ih=%d mh=%d mode=%s dead=%d"
                         " | real x=%.9g y=%.9g yvel=%.17g og=%d\n",
                         (unsigned long long)r.tick, r.holding, s.x, s.y, s.yvel,
-                        (int)s.onGround, (int)s.upsideDown, (int)s.hasJustHeld, (int)s.dead,
+                        (int)s.onGround, (int)s.upsideDown, (int)s.hasJustHeld,
+                        (int)s.inputHeld, (int)s.holding,
+                        s.ship ? "ship" : s.ball ? "ball" : "cube", (int)s.dead,
                         r.realx, r.realy, r.yvel, r.onground);
-        if (s.ship != (r.ship != 0)) {
+        const int simMode = s.ship ? 1 : s.ball ? 2 : 0;
+        if (simMode != r.ship) {
             std::printf(
                 "%s: MODE MISMATCH at tick %llu after %llu matched ticks: "
-                "sim ship=%d real ship=%d (x=%.9g y=%.9g)\n",
+                "sim mode=%d real mode=%d (0 cube, 1 ship, 2 ball; x=%.9g y=%.9g)\n",
                 path, (unsigned long long)r.tick, (unsigned long long)matched,
-                (int)s.ship, r.ship, s.x, s.y);
+                simMode, r.ship, s.x, s.y);
             return 1;
         }
         if (s.upsideDown != (r.upsidedown != 0)) {

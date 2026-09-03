@@ -22,6 +22,13 @@
 //     (ship is continuous control; a held cube buffers a landing re-jump,
 //     exactly like the real game; a fresh hold inside a ring fires it, a
 //     hold started before the ring fires it on contact)
+//   - ball mode (Cycles) is the cube's shape: on a surface, action 1 = one
+//     gravity flip as ONE step (the press flips, then the ball rolls
+//     through the air to the other surface; a ring on the way ends the
+//     step). The flip spends m_isHolding while the button stays down, so a
+//     grounded ball whose button is still down first releases for one tick
+//     (the real game needs release + press to flip again). Airborne, hold
+//     buffers a flip on landing exactly like the cube's re-jump.
 // Steps have variable duration; StepResult.ticks feeds SMDP discounting
 // (gamma^ticks) in the trainer. Per-tick holds are recorded so an episode
 // replays exactly.
@@ -88,9 +95,14 @@ struct EnvInstance {
 
         if (!s.ship && s.onGround && hold) {
             // Hop macro: click, then ballistic flight to the next decision
-            // point (landing, mode switch, or end).
+            // point (landing, mode switch, or end). A ball whose press was
+            // already spent (button down, m_isHolding clear) releases for
+            // one tick first so the click below is a fresh press.
+            if (s.ball && s.inputHeld && !s.holding) {
+                if (tickOnce(false)) goto done;
+            }
             bool wasShip = false;
-            while (s.onGround && !wasShip) {
+            while (s.onGround && !wasShip && r.ticks < cfg.maxJumpTicks) {
                 if (tickOnce(true)) goto done;
                 wasShip = s.ship;
             }
