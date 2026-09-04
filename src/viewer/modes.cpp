@@ -221,10 +221,12 @@ void PlayMode::draw(const App& app) {
     // camY_ is the engine y of the screen bottom; ground top (engine 90) sits
     // 90 units above it at rest.
     if (player_.ship || player_.ball) {
-        // Ship band: floor 90 / ceiling 390 both on screen; ease the camera
-        // toward the band centered vertically (80 = 90 - (320-300)/2). The
-        // ball band is 240 tall (ceiling 330): 50 = 90 - (320-240)/2.
-        const float bandCam = player_.ship ? 80.0f : 50.0f;
+        // Ship band: floor / ceiling both on screen; ease the camera toward
+        // the band centered vertically (floor - (320-300)/2 = 80 at floor
+        // 90). The ball band is 240 tall: floor - (320-240)/2. The floor is
+        // the portal-installed one (xStep raises it, see PlayerState::
+        // bandFloor).
+        const float bandCam = player_.bandFloor - (player_.ship ? 10.0f : 40.0f);
         camY_ += (bandCam - camY_) * std::min(1.0f, 6.0f * GetFrameTime());
     } else {
         if (player_.y - camY_ < 120.0f) camY_ = player_.y - 120.0f;
@@ -241,7 +243,8 @@ void PlayMode::draw(const App& app) {
     drawWorld(app, cam_, player_.x,
               [&] { drawPlayer(app, player_, player_.ship ? shipRot_
                                                   : player_.ball ? ballRot_ : cubeRot_); },
-              player_.ship ? 390.0f : player_.ball ? 330.0f : 0.0f);
+              player_.ship ? player_.bandFloor + 300.0f
+              : player_.ball ? player_.bandFloor + 240.0f : 0.0f);
 
     float progress = app.maxX > 0 ? std::min(1.0f, player_.x / app.maxX) : 0.0f;
     DrawText(TextFormat("Attempt %d   x: %.0f / %.0f  (%d%%)   tick %lld   %d fps%s%s",

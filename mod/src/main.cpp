@@ -4,6 +4,7 @@
 #include <Geode/modify/PlayerObject.hpp>
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,19 @@ struct TickRow {
     float realX;
     float realY;
     double totalTime;
+    // Flying-band diagnostics (appended 2026-09-03, trace_check ignores
+    // trailing columns): the engine's live band floor / ceiling
+    // (GJBaseGameLayer::getMinPortalY / getMaxPortalY, the values
+    // checkCollisions snaps against), the GJGameState band center (+0x308)
+    // and height (+0x2ec) written by animateInDualGroundNew, its "dual
+    // ground exists" flag (+0x2a0), and the two ground layers' y.
+    float bandMin;
+    float bandMax;
+    float bandCenter;
+    float bandH;
+    uint8_t bandFlag;
+    float ground1Y;
+    float ground2Y;
 };
 
 // One row per PlayerObject::collidedWithObject call (kind=0, rect is the
@@ -79,12 +93,14 @@ struct Tracer {
         auto path = dir / fmt::format("attempt_{:04}.csv", attempt);
         if (auto* f = std::fopen(path.string().c_str(), "wb")) {
             std::fputs("format=3\n", f);
-            std::fputs("src,tick,x,y,yvel,holding,onground,upsidedown,ship,dead,speed,dt,halftick,lasttick,nodex,realx,realy,totaltime\n", f);
+            std::fputs("src,tick,x,y,yvel,holding,onground,upsidedown,ship,dead,speed,dt,halftick,lasttick,nodex,realx,realy,totaltime,bandmin,bandmax,bandcenter,bandh,bandflag,ground1y,ground2y\n", f);
             for (auto const& r : rows) {
-                std::fprintf(f, "%u,%llu,%.9g,%.9g,%.17g,%u,%u,%u,%u,%u,%.9g,%.9g,%u,%u,%.9g,%.9g,%.9g,%.17g\n",
+                std::fprintf(f, "%u,%llu,%.9g,%.9g,%.17g,%u,%u,%u,%u,%u,%.9g,%.9g,%u,%u,%.9g,%.9g,%.9g,%.17g,%.9g,%.9g,%.9g,%.9g,%u,%.9g,%.9g\n",
                     r.src, (unsigned long long)r.tick, r.x, r.y, r.yVel, r.holding,
                     r.onGround, r.upsideDown, r.ship, r.dead, r.speed,
-                    r.dt, r.halfTick, r.lastTick, r.nodeX, r.realX, r.realY, r.totalTime);
+                    r.dt, r.halfTick, r.lastTick, r.nodeX, r.realX, r.realY, r.totalTime,
+                    r.bandMin, r.bandMax, r.bandCenter, r.bandH, r.bandFlag,
+                    r.ground1Y, r.ground2Y);
             }
             std::fclose(f);
             log::info("wrote {} ticks -> {}", rows.size(), path.string());
@@ -111,6 +127,19 @@ Tracer g_tracer;
 
 void logRow(uint8_t src, PlayerObject* p, float dt, bool halfTick, bool lastTick) {
     if (g_tracer.stopped) return;
+    float bandMin = 0.f, bandMax = 0.f, bandCenter = 0.f, bandH = 0.f;
+    uint8_t bandFlag = 0;
+    float g1 = 0.f, g2 = 0.f;
+    if (auto* pl = PlayLayer::get()) {
+        bandMin = pl->getMinPortalY();
+        bandMax = pl->getMaxPortalY();
+        // GJGameState +0x308 / +0x2ec are floats the bindings type as int.
+        std::memcpy(&bandCenter, &pl->m_gameState.m_unkInt14, sizeof(float));
+        std::memcpy(&bandH, &pl->m_gameState.m_unkInt11, sizeof(float));
+        bandFlag = (uint8_t)pl->m_gameState.m_unkBool1;
+        if (pl->m_groundLayer) g1 = pl->m_groundLayer->getPositionY();
+        if (pl->m_groundLayer2) g2 = pl->m_groundLayer2->getPositionY();
+    }
     g_tracer.rows.push_back(TickRow{
         src,
         g_tracer.tick,
@@ -131,6 +160,13 @@ void logRow(uint8_t src, PlayerObject* p, float dt, bool halfTick, bool lastTick
         p->getRealPosition().x,
         p->getRealPosition().y,
         p->m_totalTime,
+        bandMin,
+        bandMax,
+        bandCenter,
+        bandH,
+        bandFlag,
+        g1,
+        g2,
     });
 }
 

@@ -33,9 +33,26 @@ struct Box {
 // canBeActivatedByPlayer).
 enum class PortalMode : uint8_t { Cube, Ship, Ball };
 
+// Flying-band floor set by a ship / ball portal (xStep, 2026-09-03). The
+// engine centers the flying band on the PORTAL, not on the ground:
+// GJBaseGameLayer::playerWillSwitchMode (0x212ef0) -> updateDualGround
+// (0x213180) -> animateInDualGroundNew (0x213370) computes
+//   center = max(90, floorf((portal.startPos.y - H/2) / 30) * 30) + H/2
+// (0x140213429..0x140213471, floorf = the CRT import, H = the mode's
+// getGroundHeightForMode: ship 300, ball 240) into GJGameState +0x308 and
+// H into +0x2ec, and checkCollisions' band snaps read getMinPortalY /
+// getMaxPortalY (0x213690 / 0x213770): floor = max(90, center - H/2),
+// ceiling = floor + H. Verified 2026-09-03 by logging both getters per
+// tick (trace-logger columns bandmin/bandmax): xStep's second ball portal
+// (x 18405, engine y 301) gives [180, 420] and its last ship portal (x
+// 23025, y 301) [150, 450]; every level-1..9 portal sits low enough that
+// the floor stays 90, which is why the fixed [90, 90+H] band matched all
+// 77 earlier traces. Cube portals leave the band alone (the cube snaps
+// against the real floor only).
 struct Portal {
     Box box;
     PortalMode mode;
+    float bandFloor; // Ship / Ball: the band floor this portal installs
 };
 
 // Activatable objects handled inside GJBaseGameLayer::collisionCheckObjects
@@ -54,7 +71,11 @@ struct Portal {
 // ring is marked activatedByPlayer, so it is one-shot per attempt exactly
 // like a pad. The pink ring (Time Machine id 141, type 12) shares the same
 // dispatch (jump table entry 0x140215a32) and the same ringJump path; only
-// the velocity multiplier differs (0x140399298).
+// the velocity multiplier differs (0x140399298). The gravity ring (xStep id
+// 84, type 13) is dispatched by the same entry (the table at 0x140215fe0 is
+// indexed by type - 3; entries 8/9/10 = types 11/12/13 all go to
+// 0x140215a32 -> playerTouchedRing) and runs the same ringJump path with the
+// 0.8 multiplier (0x14039924f) plus a gravity flip at the end (0x140399608).
 //
 // Mirror portals (Time Machine ids 45/46, types 14/15) are also dispatched
 // here (0x140215723 / 0x140215690) but only call GJBaseGameLayer::
@@ -72,6 +93,11 @@ enum class SpecialKind : uint8_t {
     PinkRing,       // id 141, type 12: ringJump with the jump scaled by
                     //   0.72 cube / 0.37 ship -> |yvel| 8.05 / 4.137
                     //   (Time Machine); same press/buffer semantics as 36
+    GravityRing,    // id 84, type 13 (xStep): ringJump with the jump scaled
+                    //   by 0.8 in EVERY mode -> yvel = +-8.944 toward the
+                    //   current "up", then flipGravity (yvel *= 0.5 raw,
+                    //   m_isOnGround = 0) -> 4.472 away from the NEW
+                    //   gravity; same press/buffer semantics as 36
 };
 
 struct Special {

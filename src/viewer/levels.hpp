@@ -22,8 +22,16 @@
 // 47 and ball mode (physics.hpp ball::); traces/session16 attempt_0002 (a
 // human run through the whole first ball section, 3398 ball ticks with 18
 // flips, three rings, the in-section flip portal and pad, ending in a ship
-// death at x 13738) matches bit-exactly. Every other entry
-// renders but its sim is unverified, which the GUI labels loudly.
+// death at x 13738) matches bit-exactly. xStep adds the blue gravity ring
+// id 84 (ringJump x0.8 then flipGravity, physics.hpp fireRing), the pit
+// hazard 61 and the 1.5 outline solids 69-75 (core/geometry.cpp), and it
+// is the first level whose ship / ball portals sit high enough to RAISE
+// the flying band (Portal::bandFloor: [180, 420] after the second ball
+// portal, [150, 450] after the last ship portal); traces/session20 (10
+// human attempts to 69%) and traces/session21 (a full macro-bot
+// completion, 19262 ticks, five gravity rings fired, 1010 ball ticks
+// above the old fixed ceiling) match bit-exactly. Every other
+// entry renders but its sim is unverified, which the GUI labels loudly.
 #pragma once
 
 #include <cstddef>
@@ -47,7 +55,7 @@ inline constexpr LevelInfo kLevels[] = {
     {7, "Jumper", "Jumper", true},
     {8, "Time Machine", "TimeMachine", true},
     {9, "Cycles", "Cycles", true},
-    {10, "xStep", "xStep", false},
+    {10, "xStep", "xStep", true},
     {11, "Clutterfunk", "Clutterfunk", false},
     {12, "Theory of Everything", "TheoryOfEverything", false},
     {13, "Electroman Adventures", "Electroman", false},

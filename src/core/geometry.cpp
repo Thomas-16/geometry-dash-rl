@@ -82,11 +82,64 @@ namespace {
 // helper 0x140198b20 on a same-sized frame), so it is handled with the mode
 // portals (34x86) rather than in the table below. The mechanic itself -
 // ball mode - lives in physics.hpp (ball::).
+//
+// xStep (level 10) adds 19 ids (disassembly only until the level-10
+// objects.csv dump / traces exist; every case below was read from
+// customSetup's THREE id switches: the main one (byte table 0x140194b44
+// indexed by id-5, jump table 0x1401948dc), a second one at 0x140193d1f
+// (0x140195d04 / 0x140195cfc, id-22) and a third at 0x140193dd6
+// (0x140195ea8 / 0x140195e9c, id-10); a late switch can overwrite what an
+// early one set):
+//   - 28 / 58 / 59: enter-effect triggers, case 9 like 22/24/25/26 - no
+//     collision. 48 / 49 (d_cloud) and 50 / 51 / 53 (d_ball): cases
+//     0x1401922eb / 0x14019228c set m_objectType 7 = Decoration.
+//   - 61 = pit_04 (1109 of them, mostly rows of ground pits at engine y
+//     94): the SAME case as pit 9 (0x14019237a: type 2 Hazard, rect scale
+//     +0x394 = 0.3f, +0x398 = 0.4f), 61 skips the random-frame branch
+//     (only ids 9 / 135 / 1715) and nothing later touches its size. So the
+//     box is 0.3 * m_width x 0.4 * m_height with m_width/m_height = the
+//     sprite's TRIMMED atlas rect: commonSetup (0x14018de2f) copies
+//     CCSprite::m_obRect.size (+0x1b0/+0x1b4 per the Geode cocos2d layout:
+//     m_obRect at +0x1a8, m_obContentSize at +0x6c) into +0x2fc/+0x300, and
+//     pit_04_001 is 30x18 in the 1x GJ_GameSheet.plist (sourceSize 30x26,
+//     the visible pixels sit 4 units below the center) -> 9 x 7.2 centered
+//     on the object position (getObjectRect 0x1401976c0 builds the rect
+//     around the object's position, never the sprite offset). Every
+//     previously verified frame is untrimmed, so this is the first id where
+//     trimmed-vs-content matters; OpenGD's community table also says 9 x
+//     7.2. CONFIRMED by traces/session20/objects.csv (type 2, m_width /
+//     m_height 30x18, rect 9 x 7.2000003 at x-4.5 / y-3.6) and by the
+//     attempt_0007 pit death at x 885, bit-exact.
+//   - 66 = square_b_05 (30x16 untrimmed), 83 = square_08 (30x30): plain
+//     solids (case 153), like 62/65/68 and 1-7.
+//   - 69 / 70 / 71 / 72 / 74 / 75 = blockOutline_01/03/04/05/06 and
+//     lightsquare_01_02, the 1.5 "outline" pieces xStep builds whole
+//     structures from (73, the decoration center piece, fills them). 72 is
+//     already forced to 30x30 by the main switch (case 0x140193cfb), and
+//     the THIRD switch sends all of 69-75 to 0x140193f74, which writes
+//     m_width = m_height = 30.0f - so the trimmed 30x2 (70), 2x30 (75) and
+//     2x2 (72) atlas rects never reach the hitbox: every outline piece is a
+//     30x30 solid (case 153 for the type; session20 objects.csv reports
+//     30x30 for all of 69/70/71/72/74/75, and attempt_0009 runs the
+//     13845-14420 structure bit-exact). 94 = lightsquare_01_05_color:
+//     its own case 0x1401937a6 sets m_objectType 0 (Solid) explicitly and
+//     some color flags; 30x30 frame, plain solid otherwise.
+//   - 84 = gravring_01 = the BLUE GRAVITY RING (type 13): case
+//     0x140191eaf is the yellow ring's twin (m_objectType 13, +0x3d0 = 1,
+//     rect scale 1.2f, the same ringEffect sprite helper on the same 30x30
+//     frame) -> 36x36 like 36 / 141 (session20 objects.csv: type 13,
+//     36x36). The mechanic lives in physics.hpp (ring:: / fireRing);
+//     traces/session21 (full completion) fires five of them with the
+//     ball (x 20055 / 20133 / 20211 / 20289 / 21547), each a bit-exact
+//     8.944 * 0.7 * 0.5 = 3.1304 kick with the flip. The cube path (the
+//     ring at x 15075 sits under a spiked ceiling row, off the normal
+//     route) is disassembly-only but shares everything except the 0.7.
 struct HitboxSpec {
     int id;
     char kind; // 's' solid, 'h' hazard, 'p' yellow pad, 'g' gravity pad,
                // 'n' normal-gravity portal, 'f' flip-gravity portal,
-               // 'r' yellow jump ring, 'k' pink jump pad, 'q' pink jump ring
+               // 'r' yellow jump ring, 'k' pink jump pad, 'q' pink jump ring,
+               // 'v' gravity ring
     float w, h;
 };
 
@@ -95,13 +148,21 @@ constexpr HitboxSpec kHitboxes[] = {
     {4, 's', 30.0f, 30.0f},  {6, 's', 30.0f, 30.0f}, {7, 's', 30.0f, 30.0f},
     {40, 's', 30.0f, 14.0f}, {62, 's', 30.0f, 16.0f}, {65, 's', 30.0f, 16.0f},
     {68, 's', 30.0f, 16.0f},
+    // xStep solids: square_b_05 (30x16), the outline pieces (forced 30x30
+    // by customSetup's third switch), square_08 and lightsquare_01_05_color
+    {66, 's', 30.0f, 16.0f}, {69, 's', 30.0f, 30.0f}, {70, 's', 30.0f, 30.0f},
+    {71, 's', 30.0f, 30.0f}, {72, 's', 30.0f, 30.0f}, {74, 's', 30.0f, 30.0f},
+    {75, 's', 30.0f, 30.0f}, {83, 's', 30.0f, 30.0f}, {94, 's', 30.0f, 30.0f},
     {8, 'h', 6.0f, 12.0f},   {9, 'h', 9.0f, 10.8f},  {39, 'h', 6.0f, 5.6f},
     {103, 'h', 4.0f, 7.6f},
+    // xStep pit_04: 0.3 x 0.4 of the trimmed 30x18 frame (see above)
+    {61, 'h', 30.0f * 0.3f, 18.0f * 0.4f},
     {35, 'p', 25.0f, 4.0f},  {67, 'g', 25.0f, 6.0f},
     {10, 'n', 25.0f, 75.0f}, {11, 'f', 25.0f, 75.0f},
     {36, 'r', 30.0f * 1.2f, 30.0f * 1.2f},
     {140, 'k', 25.0f, 5.0f},
     {141, 'q', 30.0f * 1.2f, 30.0f * 1.2f},
+    {84, 'v', 30.0f * 1.2f, 30.0f * 1.2f},
 };
 
 const HitboxSpec* findSpec(int id) {
@@ -149,7 +210,15 @@ LevelGeometry LevelGeometry::build(const gd::Level& level) {
             PortalMode mode = obj.id == 13   ? PortalMode::Ship
                               : obj.id == 47 ? PortalMode::Ball
                                              : PortalMode::Cube;
-            g.portals.push_back(Portal{b, mode});
+            // animateInDualGroundNew: floorf((startY - H/2) / 30) * 30,
+            // floored at 90 (see the Portal note in geometry.hpp).
+            float bandFloor = 90.0f;
+            if (mode != PortalMode::Cube) {
+                const float H = mode == PortalMode::Ship ? 300.0f : 240.0f;
+                float v = std::floor((cy - H * 0.5f) / 30.0f) * 30.0f;
+                bandFloor = std::max(90.0f, v);
+            }
+            g.portals.push_back(Portal{b, mode, bandFloor});
             continue;
         }
         switch (spec->kind) {
@@ -178,6 +247,9 @@ LevelGeometry LevelGeometry::build(const gd::Level& level) {
                 break;
             case 'q':
                 g.specials.push_back(Special{b, SpecialKind::PinkRing, false});
+                break;
+            case 'v':
+                g.specials.push_back(Special{b, SpecialKind::GravityRing, false});
                 break;
         }
     }

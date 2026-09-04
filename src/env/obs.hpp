@@ -200,8 +200,9 @@ inline void buildObs(const gdcore::PlayerState& s,
     // (0 while overlapping), dy = box bottom relative to the player, kind:
     // yellow pad +1, gravity pad -1, normal-gravity portal +0.5,
     // flip-gravity portal -0.5, yellow jump ring +0.25 (obs v4), pink
-    // jump pad +0.75, pink jump ring -0.25 (new values in the existing kind
-    // slot, no layout change; levels 1-5 never emit them).
+    // jump pad +0.75, pink jump ring -0.25, gravity ring -0.75 (xStep; new
+    // values in the existing kind slot, no layout change; levels 1-5 never
+    // emit them).
     // Already-activated pads/rings are still reported (the featurizer has
     // no activation state); they sit behind or under the player only
     // briefly.
@@ -223,6 +224,7 @@ inline void buildObs(const gdcore::PlayerState& s,
                 case gdcore::SpecialKind::YellowRing: sk[k] = 0.25f; break;
                 case gdcore::SpecialKind::PinkPad: sk[k] = 0.75f; break;
                 case gdcore::SpecialKind::PinkRing: sk[k] = -0.25f; break;
+                case gdcore::SpecialKind::GravityRing: sk[k] = -0.75f; break;
             }
         }
         out[18] = sd[0];

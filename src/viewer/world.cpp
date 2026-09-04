@@ -378,6 +378,7 @@ void drawHitboxes(const App& app, const Camera2D& cam) {
             case gdcore::SpecialKind::YellowRing: c = Color{255, 200, 40, 255}; break;
             case gdcore::SpecialKind::PinkPad: c = Color{255, 120, 220, 255}; break;
             case gdcore::SpecialKind::PinkRing: c = Color{255, 120, 220, 255}; break;
+            case gdcore::SpecialKind::GravityRing: c = Color{90, 170, 255, 255}; break;
         }
         DrawRectangleRec(r, Color{c.r, c.g, c.b, 60});
         DrawRectangleLinesEx(r, lw, c);
@@ -445,13 +446,13 @@ void loadMusic(App& app) {
     std::filesystem::path local = std::filesystem::path("assets") / song;
     std::filesystem::path p = std::filesystem::exists(local) ? local : app.resDir / song;
     if (!std::filesystem::exists(p)) {
-        TraceLog(LOG_WARNING, "%s unavailable — playing silent", song.c_str());
+        TraceLog(LOG_WARNING, "%s unavailable ï¿½ playing silent", song.c_str());
         return;
     }
     app.music = LoadMusicStream(p.string().c_str());
     app.musicLoaded = IsMusicValid(app.music);
     if (app.musicLoaded) app.music.looping = false;
-    else TraceLog(LOG_WARNING, "%s failed to load — playing silent", song.c_str());
+    else TraceLog(LOG_WARNING, "%s failed to load ï¿½ playing silent", song.c_str());
 }
 
 void drawFrameAt(const Atlas& atlas, const AtlasFrame& f, Vector2 worldCenter,

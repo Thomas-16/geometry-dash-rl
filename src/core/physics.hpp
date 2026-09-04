@@ -17,7 +17,9 @@ namespace gdcore {
 // WHILE FLYING — see the ship:: notes on the upside-down ship; Time Machine
 // adds the pink jump ring id 141 — see ring:: — and mirror portals, which
 // are camera-only; Cycles adds the ball portal id 47 and with it BALL MODE,
-// see ball::).
+// see ball::; xStep adds the blue GRAVITY RING id 84 — a ring jump followed
+// by a gravity flip, see the ring notes and fireRing — plus new solid /
+// hazard ids that only touch geometry.cpp).
 //
 // Verified bit-exact against traces at float32 position level. The game's
 // internal per-tick order is:
@@ -100,6 +102,26 @@ namespace gdcore {
 //     is type-independent for 11 and 12, so the pink ring is the yellow
 //     ring with yvel = round3(f64(f32(sign) * f32(f32(m_jumpAccel) *
 //     0.72f))) = +-8.05 for the cube (4.137 for a ship pressing on it).
+//   - GRAVITY RING (xStep id 84, type 13, .rdata 0x140622ba4 = 0.8f): the
+//     0.8 multiplier is taken at 0x14039924f BEFORE (and instead of) the
+//     per-mode pink-ring table, i.e. it is 0.8 in every mode; the velocity
+//     write at 0x14039951b is the common one, yvel = round3(f64(f32(sign)
+//     * f32(f32(m_jumpAccel) * 0.8f) * sizeMul)) = +-8.944 with the sign
+//     of the CURRENT gravity (an upward kick under normal gravity), then
+//     the ball's raw f64(0.7f) multiply + m_isHolding = 0 (0x1403995be,
+//     mode-generic), and only THEN (0x140399608, type == 13) the flip:
+//     GJBaseGameLayer::flipGravity(player, !m_isUpsideDown, noEffects = 1)
+//     (0x140212b00; it just forwards to PlayerObject::flipGravity when the
+//     state differs, plus the dual-player mirror), so yvel *= 0.5 raw and
+//     m_isOnGround = 0 (0x14039a3cd) with the +0x800 flip stamp. Net for
+//     the cube: yvel = 4.472 away from the NEW gravity, i.e. the player
+//     keeps moving toward the old "up" while the new gravity accelerates
+//     it the same way - the blue orb sends a normal-gravity cube to the
+//     ceiling. Ball: 8.944 * 0.7 * 0.5 = 3.1304 raw. The virtual called
+//     afterwards with the new flag (vtable +0x500 = PlayLayer::
+//     playGravityEffect) is presentation only. The ring itself is the
+//     yellow ring's twin in customSetup (36x36 box, same playerTouchedRing
+//     dispatch, same press / buffer / one-shot semantics).
 // PlayerObject::m_gravity (+0x7c8) and m_jumpAccel (+0x7c0) are set by
 // PlayerObject::updateTimeMod (win 2.2081 base+0x3a0d50) from the speed:
 // speed 0.9f -> m_jumpAccel 0x40265c2d20000000 (11.18003..., which the
@@ -197,7 +219,7 @@ constexpr double kFlipKick = static_cast<double>(0.6f);       // 0x140622db0 (f6
 constexpr double kRingMul = static_cast<double>(0.7f);        // 0x140622dd0 (f64 0.6999999881)
 constexpr double kPadMul = static_cast<double>(0.6f);         // 0x140622db0
 constexpr float kBandHeight = 240.0f;                         // 0x140623408
-constexpr float kCeilY = 90.0f + kBandHeight - 15.0f;         // 315
+constexpr float kCeilY = 90.0f + kBandHeight - 15.0f;         // 315 when the floor is 90 (see bandFloor)
 constexpr double kSnapWindow = 10.0;                          // cube window
 } // namespace ball
 
@@ -210,6 +232,7 @@ constexpr float kPinkMulCube = 0.72f;  // .rdata 0x140622b80 (default branch)
 constexpr float kPinkMulShip = 0.37f;  // .rdata 0x140622ac4 (m_isShip)
 constexpr float kPinkMulBird = 0.42f;  // .rdata 0x140622ad4 (m_isBird)
 constexpr float kPinkMulBall = 0.77f;  // .rdata 0x140622b94 (m_isBall)
+constexpr float kGravityMul = 0.8f;    // .rdata 0x140622ba4 (type 13, every mode)
 } // namespace ring
 
 struct PhysicsConfig {
@@ -284,10 +307,13 @@ constexpr double kMinYVel = static_cast<double>(0.8f * -8.0f); // f32(-6.4)
 constexpr double kMaxYVel = 8.0;
 constexpr double kMinYVelFlipped = static_cast<double>(-8.0f);
 constexpr double kMaxYVelFlipped = static_cast<double>(0.8f * 8.0f); // 6.4f
-// Flying band (GJBaseGameLayer::checkCollisions head): floor at 90, ceiling
-// at floor + 300 (getGroundHeightForMode, ship portal type 5 -> 300.0).
-// Player-center clamp lines are +-half the 30-unit box.
-constexpr float kCeilY = 90.0f + 300.0f - 15.0f; // 375
+// Flying band (GJBaseGameLayer::checkCollisions head): floor at the band
+// floor the last ship / ball portal installed (PlayerState::bandFloor,
+// see Portal::bandFloor in geometry.hpp — 90 in levels 1-9, raised by
+// xStep's high portals), ceiling at floor + 300 (getGroundHeightForMode,
+// ship portal type 5 -> 300.0). Player-center clamp lines are +-half the
+// 30-unit box. kCeilY is the level-1..9 value, kept for reference.
+constexpr float kCeilY = 90.0f + 300.0f - 15.0f; // 375 when the floor is 90
 // Note: checkCollisions has a 0.2s post-portal snap grace, but only on the
 // all-flags-clear (dual) path — the ship path snaps unconditionally
 // (0x140213dea / 0x140214090 go straight to the snap; the [0x7d8]/[0x800]
@@ -398,6 +424,10 @@ struct PlayerState {
     bool ship = false;
     bool ball = false;       // m_isBall (+0x9bb): Cycles, see ball::
     bool upsideDown = false; // m_isUpsideDown (gravity flipped)
+    // Flying-band floor installed by the last ship / ball portal
+    // (Portal::bandFloor; getMinPortalY). The ceiling is floor + 300
+    // (ship) / + 240 (ball). 90 until a portal raises it (xStep).
+    float bandFloor = 90.0f;
     // Ticks since the last mode-portal activation (bookkeeping; the ship
     // band snap itself has no post-portal grace — see ship:: notes).
     int sinceSwitch = 1 << 20;
@@ -490,16 +520,21 @@ inline int pressableRing(const PlayerState& s) {
     return -1;
 }
 
-// PlayerObject::ringJump, yellow (type 11) and pink (type 12) ring branch.
+// PlayerObject::ringJump, yellow (type 11), pink (type 12) and gravity
+// (type 13) ring branch.
 inline void fireRing(PlayerState& s, const PhysicsConfig& c,
                      const LevelGeometry& g, int idx) {
     (void)c;
+    const SpecialKind kind = g.specials[static_cast<size_t>(idx)].kind;
     const float sign = s.upsideDown ? -1.0f : 1.0f;
-    // 0x399237: xmm6 = f32(m_jumpAccel); 0x399298: type 12 scales it by the
-    // mode multiplier (ship / bird / ball / default); 0x3994ef: f32(sign) *
-    // xmm6 * sizeMul (1.0 unless mini), through the 3-decimal setter.
+    // 0x399237: xmm6 = f32(m_jumpAccel); 0x39924f: type 13 scales it by
+    // 0.8f (no mode table); 0x399298: type 12 scales it by the mode
+    // multiplier (ship / bird / ball / default); 0x3994ef: f32(sign) * xmm6
+    // * sizeMul (1.0 unless mini), through the 3-decimal setter.
     float j = static_cast<float>(ring::kJumpAccel);
-    if (g.specials[static_cast<size_t>(idx)].kind == SpecialKind::PinkRing)
+    if (kind == SpecialKind::GravityRing)
+        j *= ring::kGravityMul;
+    else if (kind == SpecialKind::PinkRing)
         j *= s.ship ? ring::kPinkMulShip
              : s.ball ? ring::kPinkMulBall
                       : ring::kPinkMulCube;
@@ -509,9 +544,20 @@ inline void fireRing(PlayerState& s, const PhysicsConfig& c,
     s.hasJustHeld = false; // 0x3991ee
     if (s.ball) {
         // 0x1403995be..601: m_isBall -> yvel *= f64(0.7f) as a raw double
-        // write, then m_isHolding = 0 (the press is spent, no flip).
+        // write, then m_isHolding = 0 (the press is spent; the ball's own
+        // flip does not happen here - a gravity ring flips below).
         s.yvel *= ball::kRingMul;
         s.holding = false;
+    }
+    if (kind == SpecialKind::GravityRing) {
+        // 0x140399608: type 13 -> GJBaseGameLayer::flipGravity(player,
+        // !m_isUpsideDown, 1) -> PlayerObject::flipGravity: the flag, the
+        // +0x800 stamp, yvel *= 0.5 raw (0x14039a2d4, +0x7e1 clear) and
+        // m_isOnGround = 0 (0x14039a3cd). Same effect as a gravity portal.
+        s.upsideDown = !s.upsideDown;
+        s.yvel *= pad::kFlipDamp;
+        s.onGround = false;
+        s.sinceFlip = 0;
     }
     markSpecialDone(s, idx); // activatedByPlayer (0x399cbd)
     removeRing(s.ringNow, s.nRingNow, idx);   // removeObject (0x398e3a)
@@ -801,7 +847,8 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
                 break;
             }
             case SpecialKind::YellowRing:
-            case SpecialKind::PinkRing: {
+            case SpecialKind::PinkRing:
+            case SpecialKind::GravityRing: {
                 if (done) break; // hasBeenActivatedByPlayer: skipped at 0x214a8c
                 // playerTouchedRing: remember the contact, then ringJump,
                 // which fires only for a non-flying player holding an
@@ -832,6 +879,9 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
             return;
         const bool toShip = p.mode == PortalMode::Ship;
         const bool toBall = p.mode == PortalMode::Ball;
+        // playerWillSwitchMode -> updateDualGround on every ship / ball
+        // portal contact: the band is re-centered on THIS portal.
+        if (toShip || toBall) s.bandFloor = p.bandFloor;
         if (s.ship != toShip) {
             s.ship = toShip;
             s.yvel *= 0.5;
@@ -955,14 +1005,18 @@ inline void stepCubeSolids(PlayerState& s, const PhysicsConfig& c,
 // is why traces show onground=1 for almost the whole flight.
 inline void stepShipBand(PlayerState& s, const PhysicsConfig& c) {
     const double sign = s.upsideDown ? -1.0 : 1.0;
-    if (s.y > ship::kCeilY) {
-        s.y = ship::kCeilY;
+    // Band lines from the portal-installed floor (getMinPortalY /
+    // getMaxPortalY): player center in [floor + 15, floor + 300 - 15].
+    const float floorY = s.bandFloor + c.half;
+    const float ceilY = s.bandFloor + 300.0f - c.half;
+    if (s.y > ceilY) {
+        s.y = ceilY;
         if (s.yvel > 0.0) {
             if (!(sign * s.yvel > 5.0)) s.onGround = true;
             s.yvel = 0.0;
         }
-    } else if (s.y < c.groundY) {
-        s.y = c.groundY;
+    } else if (s.y < floorY) {
+        s.y = floorY;
         if (s.yvel < 0.0) {
             if (!(sign * s.yvel > 5.0)) s.onGround = true;
             s.yvel = 0.0;
@@ -1048,11 +1102,13 @@ inline void stepFlyingSolids(PlayerState& s, const PhysicsConfig& c,
 // snap has a post-portal grace (r12 = ceiling-height-changed is 0 in a
 // plain level).
 inline void stepBallBand(PlayerState& s, const PhysicsConfig& c) {
-    if (s.y > ball::kCeilY) {
-        s.y = ball::kCeilY;
+    const float floorY = s.bandFloor + c.half;
+    const float ceilY = s.bandFloor + ball::kBandHeight - c.half;
+    if (s.y > ceilY) {
+        s.y = ceilY;
         if (s.yvel > 0.0) hitGround(s);
-    } else if (s.y < c.groundY) {
-        s.y = c.groundY;
+    } else if (s.y < floorY) {
+        s.y = floorY;
         hitGround(s);
     }
 }

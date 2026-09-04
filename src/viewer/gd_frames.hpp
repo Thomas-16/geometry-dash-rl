@@ -1,6 +1,6 @@
 // Object-id -> sprite-frame table for the Stereo Madness, Back On Track,
-// Polargeist, Dry Out, Base After Base, Can't Let Go, Jumper and Time
-// Machine object sets.
+// Polargeist, Dry Out, Base After Base, Can't Let Go, Jumper, Time
+// Machine, Cycles and xStep object sets.
 // Presentation-only viewer data (like the old shape table); NOT hitbox or
 // collision truth. Mapping cross-checked against OpenGD's GameObject table
 // and verified against the GJ_GameSheet-uhd / GJ_GameSheet02-uhd atlases.
@@ -59,6 +59,31 @@ inline const RenderSpec* renderSpec(int id) {
         {141, {"ring_02_001.png"}, 3, Tint::Obj},
         // Polargeist: yellow jump ring, glow chain
         {36, {"ring_01_001.png"}, 3, Tint::Obj},
+        // xStep: blue gravity ring (engine type 13, 36x36 like 36/141),
+        // ground pit hazard 61 (engine 9x7.2), the 1.5 outline pieces
+        // 69-75 (all 30x30 solids in the engine, whatever their frames
+        // show), square_b_05 slab, square_08 and the lit color block 94,
+        // glow clouds / balls (decoration) and three more enter-effect
+        // triggers
+        {84, {"gravring_01_001.png"}, 3, Tint::Obj},
+        {61, {"pit_04_001.png"}, 2, Tint::Black},
+        {66, {"square_b_05_001.png"}, -2, Tint::Black},
+        {69, {"blockOutline_01_001.png"}, 1, Tint::Obj},
+        {70, {"lightsquare_01_02_001.png"}, 1, Tint::Obj},
+        {71, {"blockOutline_03_001.png"}, 1, Tint::Obj},
+        {72, {"blockOutline_06_001.png"}, 1, Tint::Obj},
+        {74, {"blockOutline_04_001.png"}, 1, Tint::Obj},
+        {75, {"blockOutline_05_001.png"}, 1, Tint::Obj},
+        {83, {"square_08_001.png"}, 1, Tint::Obj},
+        {94, {"lightsquare_01_05_color_001.png"}, 1, Tint::Obj},
+        {48, {"d_cloud_01_001.png"}, -1, Tint::Glow},
+        {49, {"d_cloud_02_001.png"}, -1, Tint::Glow},
+        {50, {"d_ball_01_001.png"}, -1, Tint::Glow},
+        {51, {"d_ball_02_001.png"}, -1, Tint::Glow},
+        {53, {"d_ball_04_001.png"}, -1, Tint::Glow},
+        {28, {}, 99, Tint::Obj},  // enter-effect: scale down (xStep)
+        {58, {}, 99, Tint::Obj},  // enter-effect: from right half (xStep)
+        {59, {}, 99, Tint::Obj},  // enter-effect: from right half, inverted
         {110, {"d_chain_02_001.png"}, -2, Tint::Glow},
         {142, {"secretCoin_01_001.png"}, 3, Tint::Obj},
         {15, {"rod_01_001.png"}, -1, Tint::Obj},
