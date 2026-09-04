@@ -11,11 +11,11 @@ MSYS2 UCRT64 (g++/cmake/ninja on PATH): `cmake -S . -B build -G Ninja && cmake -
 
 ## Level data
 
-- GD install: `S:\SteamLibrary\steamapps\common\Geometry Dash\`; levels at `Resources\levels\<id>.txt` (URL-safe base64 of gzip). Levels 1–10 are trace-verified.
+- GD install: `S:\SteamLibrary\steamapps\common\Geometry Dash\`; levels at `Resources\levels\<id>.txt` (URL-safe base64 of gzip). Levels 1–11 are trace-verified.
 - **Never commit level data or extracted game assets.** Read from the install at runtime.
 - Tools take `GD_LEVEL_PATH` (default `levels/1.txt`); trainer/eval take `--level <path>`.
-- Smoke test (`build/dump.exe <level>`): objects/ids = 1: 2291/31, 2: 1545/26, 3: 1531/35, 4: 1444/30, 5: 2146/35, 6: 1704/33, 7: 2813/34, 8: 3599/36, 9: 3921/40, 10: 4716/58.
-- **Hitboxes come from an `objects.csv` dump** (the trace logger writes one on level load), never from sprite frame sizes or the viewer's shape table.
+- Smoke test (`build/dump.exe <level>`): objects/ids = 1: 2291/31, 2: 1545/26, 3: 1531/35, 4: 1444/30, 5: 2146/35, 6: 1704/33, 7: 2813/34, 8: 3599/36, 9: 3921/40, 10: 4716/58, 11: 4863/66.
+- **Hitboxes come from an `objects.csv` dump** (the trace logger writes one on level load), never from sprite frame sizes or the viewer's shape table. Circular hazards: read the `radius` column (the engine's m_width at setup time is the **-uhd** trimmed rect / 4, e.g. sawblade 98 = 39.25 → 11.775, not the 1x sheet's 40).
 
 ## Trace regression (run after touching the sim)
 
@@ -33,6 +33,7 @@ Every trace must MATCH incl. death ticks, with no `[onground mismatches ...]` su
 | 8 | `... 8.txt ... traces/session15/*attempt_000[12].csv` |
 | 9 | `... 9.txt ... traces/session16/attempt_*.csv traces/session17/attempt_*.csv traces/session1[789]/logger_attempt_0001.csv traces/session1[89]/attempt_0001.csv` |
 | 10 | `... 10.txt ... traces/session20/attempt_*.csv traces/session21/attempt_0001.csv traces/session22/attempt_0001.csv traces/session22/logger_attempt_0001.csv` |
+| 11 | `... 11.txt ... traces/session23/attempt_0001.csv traces/session23/logger_attempt_0001.csv` |
 
 ## Architecture rules
 
@@ -52,7 +53,7 @@ Every trace must MATCH incl. death ticks, with no `[onground mismatches ...]` su
 
 ## RL env (src/env + python/gdrl)
 
-- **Obs versioning** (`src/env/obs.hpp`): frozen layout, additive-only changes bump `kObsVersion` (v4 now; grid y-band change = v5). `obs.hpp` is `#include`d by the Geode mod — compile-time constants only.
+- **Obs versioning** (`src/env/obs.hpp`): frozen layout, additive-only changes bump `kObsVersion` (v5 now: scalar 26 = mini flag; grid y-band change = v6). `obs.hpp` is `#include`d by the Geode mod — compile-time constants only. Old checkpoints load through `load_model_state` (zero columns for appended scalars).
 - **Env stepping is parallel and bit-deterministic** (`$GDENV_THREADS`, 1 = serial). After touching the env layer: `./build/env_check det` AND `python -m gdrl.selftest` (from `python/`).
 - **Regression bar**: default `python -m gdrl.train` must still beat Stereo Madness (`det ... WIN`, reference det WIN ≈ update 119) and `python -m gdrl.eval runs/<name>/ckpt_best_det.pt` writes `solution.json`. Don't shrink `--updates` — it changes the anneal.
 - Hyperparameter defaults live in `PPOConfig` (`python/gdrl/ppo.py`); train.py CLI and `Gui::TrainForm` mirror them — never a second default.

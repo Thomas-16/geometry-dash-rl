@@ -58,7 +58,8 @@ Key keyOf(const gdcore::PlayerState& s) {
               (s.hasJustHeld ? 16u : 0u) |
               (gdcore::pressableRing(s) >= 0 ? 32u : 0u) |
               (s.ball ? 64u : 0u) | (s.inputHeld ? 128u : 0u) |
-              (static_cast<uint32_t>(s.specialDone & 0xffu) << 8);
+              (static_cast<uint32_t>(s.specialDone & 0xffu) << 8) |
+              (s.mini ? (1u << 16) : 0u);
     return k;
 }
 

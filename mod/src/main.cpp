@@ -48,6 +48,9 @@ struct TickRow {
     uint8_t bandFlag;
     float ground1Y;
     float ground2Y;
+    // m_vehicleSize != 1 (Clutterfunk size portals; appended 2026-09-04,
+    // trace_check finds it by header name and checks it against the sim).
+    uint8_t mini;
 };
 
 // One row per PlayerObject::collidedWithObject call (kind=0, rect is the
@@ -93,14 +96,14 @@ struct Tracer {
         auto path = dir / fmt::format("attempt_{:04}.csv", attempt);
         if (auto* f = std::fopen(path.string().c_str(), "wb")) {
             std::fputs("format=3\n", f);
-            std::fputs("src,tick,x,y,yvel,holding,onground,upsidedown,ship,dead,speed,dt,halftick,lasttick,nodex,realx,realy,totaltime,bandmin,bandmax,bandcenter,bandh,bandflag,ground1y,ground2y\n", f);
+            std::fputs("src,tick,x,y,yvel,holding,onground,upsidedown,ship,dead,speed,dt,halftick,lasttick,nodex,realx,realy,totaltime,bandmin,bandmax,bandcenter,bandh,bandflag,ground1y,ground2y,mini\n", f);
             for (auto const& r : rows) {
-                std::fprintf(f, "%u,%llu,%.9g,%.9g,%.17g,%u,%u,%u,%u,%u,%.9g,%.9g,%u,%u,%.9g,%.9g,%.9g,%.17g,%.9g,%.9g,%.9g,%.9g,%u,%.9g,%.9g\n",
+                std::fprintf(f, "%u,%llu,%.9g,%.9g,%.17g,%u,%u,%u,%u,%u,%.9g,%.9g,%u,%u,%.9g,%.9g,%.9g,%.17g,%.9g,%.9g,%.9g,%.9g,%u,%.9g,%.9g,%u\n",
                     r.src, (unsigned long long)r.tick, r.x, r.y, r.yVel, r.holding,
                     r.onGround, r.upsideDown, r.ship, r.dead, r.speed,
                     r.dt, r.halfTick, r.lastTick, r.nodeX, r.realX, r.realY, r.totalTime,
                     r.bandMin, r.bandMax, r.bandCenter, r.bandH, r.bandFlag,
-                    r.ground1Y, r.ground2Y);
+                    r.ground1Y, r.ground2Y, r.mini);
             }
             std::fclose(f);
             log::info("wrote {} ticks -> {}", rows.size(), path.string());
@@ -167,6 +170,7 @@ void logRow(uint8_t src, PlayerObject* p, float dt, bool halfTick, bool lastTick
         bandFlag,
         g1,
         g2,
+        (uint8_t)(p->m_vehicleSize != 1.0f),
     });
 }
 
@@ -184,11 +188,15 @@ void dumpObjects(PlayLayer* pl) {
     auto* f = std::fopen(path.string().c_str(), "wb");
     if (!f) return;
     std::fputs("format=1\n", f);
+    // radius = m_objectRadius (+0x38c): > 0 for circular hazards (the
+    // Clutterfunk sawblades), which checkCollisions tests with
+    // playerCircleCollision instead of the rect. Appended 2026-09-04.
     std::fputs("uniqueid,objid,type,x,y,rx,ry,rw,rh,w,h,rot,flipx,flipy,scalex,scaley,"
-               "obb,c1x,c1y,c2x,c2y,c3x,c3y,c4x,c4y\n", f);
+               "obb,c1x,c1y,c2x,c2y,c3x,c3y,c4x,c4y,radius\n", f);
     auto writeRow = [f](int uniqueID, int objID, int type, CCPoint pos,
                         CCRect const& r, float w, float h, float rot,
-                        bool fx, bool fy, float sx, float sy, OBB2D* obb) {
+                        bool fx, bool fy, float sx, float sy, OBB2D* obb,
+                        float radius) {
         std::fprintf(f, "%d,%d,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%u,%u,%.9g,%.9g",
             uniqueID, objID, type, pos.x, pos.y,
             r.origin.x, r.origin.y, r.size.width, r.size.height,
@@ -200,19 +208,20 @@ void dumpObjects(PlayLayer* pl) {
         } else {
             std::fputs(",0,0,0,0,0,0,0,0,0", f);
         }
-        std::fputc('\n', f);
+        std::fprintf(f, ",%.9g\n", radius);
     };
     for (auto* obj : CCArrayExt<GameObject*>(pl->m_objects)) {
         writeRow(obj->m_uniqueID, obj->m_objectID, (int)obj->m_objectType,
                  obj->getPosition(), obj->getObjectRect(),
                  obj->m_width, obj->m_height, obj->m_startRotationX,
                  obj->m_startFlipX, obj->m_startFlipY,
-                 obj->m_startScaleX, obj->m_startScaleY, obj->m_orientedBox);
+                 obj->m_startScaleX, obj->m_startScaleY, obj->m_orientedBox,
+                 obj->m_objectRadius);
     }
     if (auto* p = pl->m_player1) {
         writeRow(-1, 0, -1, p->getPosition(), p->getObjectRect(),
                  p->m_width, p->m_height, 0.0f, false, false,
-                 p->m_vehicleSize, p->m_vehicleSize, nullptr);
+                 p->m_vehicleSize, p->m_vehicleSize, nullptr, 0.0f);
     }
     std::fclose(f);
     log::info("wrote object dump -> {}", path.string());

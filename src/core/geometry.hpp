@@ -16,6 +16,16 @@ namespace gdcore {
 struct Box {
     float left, bottom, right, top;
     int order;
+    // Circular hazards (Clutterfunk sawblades 88 / 89 / 98): radius > 0
+    // means the box is only the circle's bounding square (used by the obs
+    // raster and the candidate scan) and the death test is
+    // GJBaseGameLayer::playerCircleCollision (win 2.2081 base+0x211df0),
+    // see gdcore::circleHitsPlayer in physics.hpp. 0 for every rectangle.
+    // cx / cy are the circle's center = the object position as
+    // getRealPosition returns it (kept exactly, not re-derived from the
+    // rounded box edges).
+    float radius = 0.0f;
+    float cx = 0.0f, cy = 0.0f;
 };
 
 // Collision geometry for one level, built from the level string plus the
@@ -98,6 +108,25 @@ enum class SpecialKind : uint8_t {
                     //   current "up", then flipGravity (yvel *= 0.5 raw,
                     //   m_isOnGround = 0) -> 4.472 away from the NEW
                     //   gravity; same press/buffer semantics as 36
+    // Size portals (Clutterfunk). customSetup gives id 99 m_objectType 17
+    // (0x140192a7f) and id 101 type 18 (0x140192af4), with the mode-portal
+    // field pattern (+0x420 = 10, +0x464 = 5, no rect scale); the
+    // collisionCheckObjects entries for types 17 / 18 (jump table
+    // 0x140215fe0 slots 14 / 15 -> 0x140215584 / 0x14021560a) both run
+    // canBeActivatedByPlayer, store the portal in m_lastPortalPos /
+    // +0xa80, then PlayerObject::togglePlayerScale(enable, noEffects) with
+    // enable = 0 for type 17 and 1 for type 18, then activatedByPlayer and
+    // presentation. So 99 = back to NORMAL size and 101 = MINI (the level
+    // confirms it: 101 precedes Clutterfunk's mini sections). togglePlayerScale
+    // (0x1403a0700) is idempotent (early return when the size already
+    // matches), sets m_vehicleSize (+0x9f0) to 0.6f / 1.0f and copies it
+    // into the player's rect scale (+0x394 / +0x398); it touches no
+    // velocity, no m_isOnGround and no position. Rect: 31x90 (OpenGD's
+    // engine-extracted table; the portal_08/09 front frames are 32x90
+    // trimmed the way portal_03's 35x86 gives the engine's 34x86) - to be
+    // confirmed by a level-11 objects.csv dump.
+    SizeNormal,     // id 99, type 17: togglePlayerScale(false)
+    SizeMini,       // id 101, type 18: togglePlayerScale(true)
 };
 
 struct Special {

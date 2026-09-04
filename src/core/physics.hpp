@@ -19,7 +19,9 @@ namespace gdcore {
 // are camera-only; Cycles adds the ball portal id 47 and with it BALL MODE,
 // see ball::; xStep adds the blue GRAVITY RING id 84 — a ring jump followed
 // by a gravity flip, see the ring notes and fireRing — plus new solid /
-// hazard ids that only touch geometry.cpp).
+// hazard ids that only touch geometry.cpp; Clutterfunk adds the SIZE
+// PORTALS 99 / 101 and with them MINI MODE, see mini::, and the circular
+// SAWBLADE hazards 88 / 89 / 98, see circleHitsPlayer).
 //
 // Verified bit-exact against traces at float32 position level. The game's
 // internal per-tick order is:
@@ -235,6 +237,90 @@ constexpr float kPinkMulBall = 0.77f;  // .rdata 0x140622b94 (m_isBall)
 constexpr float kGravityMul = 0.8f;    // .rdata 0x140622ba4 (type 13, every mode)
 } // namespace ring
 
+// Mini mode (Clutterfunk: size portals 99 / 101, SpecialKind::SizeNormal /
+// SizeMini). PlayerObject::togglePlayerScale (win 2.2081 base+0x3a0700)
+// writes m_vehicleSize (+0x9f0) = 0.6f (0x1403a076c) or 1.0f (0x1403a07cc)
+// and copies it into the player's rect scale +0x394 / +0x398 (0x1403a085d);
+// it changes no velocity, no m_isOnGround and no position (the rest of the
+// function scales child sprites, plays the scale effect and, for a ball,
+// resets the rotation state). Every physics site that reads +0x9f0 was
+// enumerated (96 references, 29 functions) and these are the ones that
+// change gameplay:
+//   - player rect: GameObject::getObjectRect() (0x1401976a0) = the cached
+//     getObjectRect2(m_spriteWidthScale, m_spriteHeightScale) (0x140197850
+//     -> 0x1401976c0): size = m_scaleX * m_width * scale = 30 * 0.6f = 18
+//     (float-exact), so the outer box is 18x18, half = 9. The INNER death
+//     box is collidedWithObjectInternal's direct getObjectRect(0.3f, 0.3f)
+//     (0x140393658, vtable +0x488), which multiplies m_scaleX * m_width by
+//     the 0.3 argument and never sees the vehicle size: it stays 9x9. (The
+//     player's own m_scaleX +0x488 stays 1.0: PlayerObject::setScaleX is
+//     GameObject::setScaleX, which only forwards to CCNode and the child
+//     sprites.)
+//   - floor / band lines (checkCollisions 0x140213966..0x1402139b4 and
+//     0x140213c72..0x140213c84): xmm6 = f32(f32(1 - scale) * h) * 0.5 with
+//     h = +0xab0 = 30 (PlayerObject::init 0x14038740e), i.e. 5.9999995 for
+//     the mini; cube floor line = 90 + 15 - xmm6 -> 99.0 (float-exact after
+//     the add), band floor = minPortalY + 15 - xmm6, ceiling = maxPortalY
+//     - 15 + xmm6 -> floor + 9 / ceiling - 9 (also float-exact), i.e. the
+//     lines sit at +-half in every mode. The kMaxGameplayY test
+//     (0x140213c0f) likewise flags y > maxY + xmm6 = 2796.
+//   - solid snaps (collidedWithObjectInternal 0x14039386b: y = objTop +
+//     rect.h * 0.5, and the block-2 mirror): +-9 for the mini; the snap
+//     windows (10 cube / ball, 6 flying; prologue 0x140391b90..) do not
+//     read the scale.
+//   - jump: updateJump loads xmm9 = (scale == 1) ? 1.0f : 0.8f
+//     (0x14038bab5, .rdata 0x140622ba4) and the cube / ball jump velocity
+//     is f64(f32(sign) * f32(m_jumpAccel) * xmm9) (0x14038bcfd..0x14038bd06)
+//     -> 8.944 through the 3-decimal setter (the ball then flips and
+//     scales exactly as before). ringJump (0x14039921f) and propellPlayer
+//     (0x14039f89e) use the same 0.8 "sizeMul"; bumpPlayer's pink-pad table
+//     and the ring type multipliers do not read the scale (only the red pad
+//     / red ring, types 34 / 35, do).
+//   - ship: the flying branch sets xmm9 = 0.85f when scale != 1
+//     (0x14038c4ff, .rdata 0x140622bc4) and DIVIDES the per-tick increment
+//     by it (0x14038c692: f32(f32(f32(f32(sign * A) * factor) * scale) /
+//     0.85f)) as well as both clamp bounds (0x14038cac5..0x14038cb0c:
+//     f32(f32(0.8f * -8) / 0.85f) = -7.5294118, f32(8 / 0.85f) = 9.4117647
+//     and the mirrored pair for the flipped ship). playerIsFallingBugged
+//     and the gravity constant are unchanged, as is the cube / ball gravity
+//     (no scale read on the fall path).
+//   - landing-pattern snap (checkSnapJumpToObject 0x140393de2): the first
+//     pattern's dx becomes 90 instead of 120 (xmm1 = xmm2 = 90.0f); the
+//     (+150, -30) and (+90, +60) patterns and the +-1 tolerance stay.
+//   - PlayerObject::update's three reads are the wave's x-speed doubling,
+//     the cube rotation speed and a force-counter path (+0xb88, never set
+//     in a plain level); hitGround's read only positions the landing
+//     particle. Nothing else changes.
+namespace mini {
+constexpr float kScale = 0.6f;    // m_vehicleSize, 0x3f19999a
+constexpr float kSizeMul = 0.8f;  // jump / ring / pad multiplier, 0x140622ba4
+constexpr float kShipDiv = 0.85f; // flying increment and clamp divisor, 0x140622bc4
+constexpr float kSnapDx1 = 90.0f; // checkSnapJumpToObject pattern 1 dx (120 normally)
+} // namespace mini
+
+// GJBaseGameLayer::playerCircleCollision (0x140211df0) as a classic level
+// runs it (LevelSettingsObject::m_fixRadiusCollision +0x1cf is a 2.2
+// level option, clear for the official levels, so the 0x140211ec5 branch):
+// the player's rect (getObjectRect, i.e. the outer box) CONTAINS the
+// object's position (CCRect::containsPoint, inclusive), or any of the four
+// rect corners lies strictly inside the circle (ccpDistance(corner,
+// center) < radius, float sqrt; 0x140211fa5..0x140212062). The radius is
+// m_objectRadius times max(m_scaleX, m_scaleY) unless both are 1.0. This
+// is NOT a true circle-rectangle test: a circle that crosses an edge
+// without containing a corner or being centered inside the rect is a miss.
+inline bool circleHitsPlayer(float px, float py, float half, float cx,
+                             float cy, float radius) {
+    const float l = px - half, r = px + half, b = py - half, t = py + half;
+    if (cx >= l && cx <= r && cy >= b && cy <= t) return true;
+    auto inside = [&](float x, float y) {
+        const float dx = x - cx, dy = y - cy;
+        return radius > std::sqrt(dx * dx + dy * dy);
+    };
+    // corner order as the engine tests them: (maxX, maxY), (maxX, minY),
+    // (minX, minY), (minX, maxY) — irrelevant for the outcome
+    return inside(r, t) || inside(r, b) || inside(l, b) || inside(l, t);
+}
+
 struct PhysicsConfig {
     float dx;        // per-tick x advance
     double gravity;  // per-tick yvel decrement (float precision, as double)
@@ -424,6 +510,11 @@ struct PlayerState {
     bool ship = false;
     bool ball = false;       // m_isBall (+0x9bb): Cycles, see ball::
     bool upsideDown = false; // m_isUpsideDown (gravity flipped)
+    // m_vehicleSize (+0x9f0) != 1: mini mode (Clutterfunk size portals,
+    // see mini::). Scales the outer box, the floor / band lines, the jump
+    // and pad velocities and the ship's increment; the inner death box
+    // stays 9x9.
+    bool mini = false;
     // Flying-band floor installed by the last ship / ball portal
     // (Portal::bandFloor; getMinPortalY). The ceiling is floor + 300
     // (ship) / + 240 (ball). 90 until a portal raises it (xStep).
@@ -475,9 +566,10 @@ inline float leftEdge(const Box& b) { return b.left; }
 inline float leftEdge(const Portal& p) { return p.box.left; }
 inline float leftEdge(const Special& s) { return s.box.left; }
 
-// Entries are sorted by left edge and at most `maxW` wide (34 for solids,
-// hazards and mode portals; a rotated gravity portal is 76), so candidates
-// for a player box spanning [x-half, x+half] start at left >= x-half-maxW.
+// Entries are sorted by left edge and at most `maxW` wide (34 for solids
+// and mode portals; a rotated gravity portal is 76; the widest hazard is
+// the 64.6 bounding square of sawblade 88), so candidates for a player box
+// spanning [x-half, x+half] start at left >= x-half-maxW.
 template <typename T, typename F>
 inline void forCandidates(const std::vector<T>& boxes, float x, float half,
                           F&& f, float maxW = 34.0f) {
@@ -487,8 +579,23 @@ inline void forCandidates(const std::vector<T>& boxes, float x, float half,
 }
 
 constexpr float kSpecialMaxW = 80.0f;
+constexpr float kHazardMaxW = 66.0f;
 
 } // namespace detail
+
+// Player size (mini::). The outer box is the engine's getObjectRect():
+// f32(m_width * m_vehicleSize) = 18 for the mini, 30 otherwise, half of
+// that per side; the inner death box (PhysicsConfig::inner) never scales.
+inline float playerScale(const PlayerState& s) {
+    return s.mini ? mini::kScale : 1.0f;
+}
+inline float playerHalf(const PlayerState& s, const PhysicsConfig& c) {
+    return ((c.half + c.half) * playerScale(s)) * 0.5f;
+}
+// The 0.8 "sizeMul" of updateJump / ringJump / propellPlayer.
+inline float sizeMul(const PlayerState& s) {
+    return s.mini ? mini::kSizeMul : 1.0f;
+}
 
 // One-shot record helpers (PlayerState::specialCursor/specialDone).
 inline bool specialDone(const PlayerState& s, int i) {
@@ -538,7 +645,7 @@ inline void fireRing(PlayerState& s, const PhysicsConfig& c,
         j *= s.ship ? ring::kPinkMulShip
              : s.ball ? ring::kPinkMulBall
                       : ring::kPinkMulCube;
-    const float v = sign * j * 1.0f;
+    const float v = sign * j * sizeMul(s);
     s.yvel = roundVel(static_cast<double>(v));
     s.onGround = false;    // m_canJump cleared (0x39920c)
     s.hasJustHeld = false; // 0x3991ee
@@ -622,6 +729,24 @@ inline bool isFallingBugged(const PlayerState& s, const PhysicsConfig& c) {
     return s.yvel > c.gravityMul + c.gravityMul;
 }
 
+// The ground jump velocity write (updateJump 0x14038bce0..0x14038bd0c):
+// f64(f32(sign) * f32(m_jumpAccel) * sizeMul) through the 3-decimal
+// setter: +-11.18, or +-8.944 for the mini (sizeMul 0.8f). PhysicsConfig's
+// jumpVel is the normal-size result.
+inline double groundJumpVel(const PlayerState& s, const PhysicsConfig& c) {
+    const double sign = s.upsideDown ? -1.0 : 1.0;
+    if (!s.mini) return sign * c.jumpVel;
+    const float v = static_cast<float>(sign) *
+                    static_cast<float>(ring::kJumpAccel) * mini::kSizeMul;
+    return roundVel(static_cast<double>(v));
+}
+
+// Cube / floor line for the player center: 90 + half (checkCollisions'
+// xmm7 = 90 + 15 - (1 - scale) * 15, float-exact at 105 / 99).
+inline float floorLine(const PlayerState& s, const PhysicsConfig& c) {
+    return c.groundY - c.half + playerHalf(s, c);
+}
+
 // Advance one 1/240s tick. `holding` is the input state processCommands sees
 // at the end of this tick.
 //
@@ -640,7 +765,7 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
         // The cube AND the ball run this branch (updateJump sends only the
         // flying modes to 0x14038c4f7).
         if (s.onGround && s.holding) {
-            s.yvel = sign * c.jumpVel;
+            s.yvel = groundJumpVel(s, c);
             s.onGround = false;
             s.hasJustHeld = false; // updateJump 0x38bbef
             if (s.ball) ballFlipAfterJump(s); // 0x14038be5f
@@ -666,14 +791,21 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
         const float factor = s.holding ? -1.0f : (bugged ? 0.8f : 1.2f);
         const float scale = (s.holding && bugged) ? 0.5f : 0.4f;
         const float signf = s.upsideDown ? -1.0f : 1.0f;
-        const float inc = ((signf * ship::kDtGrav) * factor) * scale;
+        // mini ship (0x14038c4ff / 0x14038c692): the increment and both
+        // clamp bounds are divided by 0.85f (xmm9), 1.0f otherwise
+        const float div = s.mini ? mini::kShipDiv : 1.0f;
+        const float inc = (((signf * ship::kDtGrav) * factor) * scale) / div;
         s.yvel = roundVel(s.yvel + static_cast<double>(-inc));
         if (!s.upsideDown) {
-            s.yvel = roundVel(std::max(s.yvel, ship::kMinYVel));
-            s.yvel = roundVel(std::min(s.yvel, ship::kMaxYVel));
+            const float lo = static_cast<float>(ship::kMinYVel) / div;
+            const float hi = static_cast<float>(ship::kMaxYVel) / div;
+            s.yvel = roundVel(std::max(s.yvel, static_cast<double>(lo)));
+            s.yvel = roundVel(std::min(s.yvel, static_cast<double>(hi)));
         } else {
-            s.yvel = roundVel(std::max(s.yvel, ship::kMinYVelFlipped));
-            s.yvel = roundVel(std::min(s.yvel, ship::kMaxYVelFlipped));
+            const float lo = static_cast<float>(ship::kMinYVelFlipped) / div;
+            const float hi = static_cast<float>(ship::kMaxYVelFlipped) / div;
+            s.yvel = roundVel(std::max(s.yvel, static_cast<double>(lo)));
+            s.yvel = roundVel(std::min(s.yvel, static_cast<double>(hi)));
         }
     }
     // Position integration, exactly as PlayerObject::update does it: the
@@ -690,7 +822,9 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
     // First the vertical bound (0x140213bfe): position.y above
     // kMaxGameplayY on two consecutive ticks is a death for every mode,
     // decided before any object is looked at.
-    if (s.y > kMaxGameplayY) {
+    // The bound and the floor line move with the player's half extent
+    // (mini: 2796 / 99, see mini::).
+    if (s.y > kMaxGameplayY + (c.half - playerHalf(s, c))) {
         if (s.overMaxY) {
             s.dead = true;
             return;
@@ -704,9 +838,10 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
         // m_isOnGround is NOT cleared here: checkCollisions only writes it in
         // the floor/band snaps and hitGround; the per-tick clear lives in
         // updateJump's fall path above (cubeIsFalling).
-        if (s.y < c.groundY) {
+        const float groundY = floorLine(s, c);
+        if (s.y < groundY) {
             if (!s.upsideDown) {
-                s.y = c.groundY;
+                s.y = groundY;
                 s.yvel = 0.0;
                 s.onGround = true;
             } else if (s.sinceFlip >= pad::kFlipFloorGraceTicks) {
@@ -714,7 +849,7 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
                 // updateCollide(0), then jump straight to the function's
                 // end — no object collisions this tick.
                 bool awayFast = -s.yvel > 5.0; // hitGround's r12 gate
-                s.y = c.groundY;
+                s.y = groundY;
                 s.yvel = 0.0;
                 s.onGround = !awayFast;
                 skipObjects = true;
@@ -757,8 +892,7 @@ inline void step(PlayerState& s, const PhysicsConfig& c,
         } else if (!s.ship && s.onGround) {
             // updateJump(0) from pushButton (0x140398036 ball / 0x14039803f
             // cube): the same jump path as the movement phase.
-            const double sign2 = s.upsideDown ? -1.0 : 1.0;
-            s.yvel = sign2 * c.jumpVel;
+            s.yvel = groundJumpVel(s, c);
             s.onGround = false;
             s.hasJustHeld = false;
             if (s.ball) ballFlipAfterJump(s);
@@ -785,16 +919,24 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
     s.nRingPrev = s.nRingNow;
     s.nRingNow = 0;
     // roll the one-shot activation window past everything already passed
+    // (the widest box is 30 wide, so the cursor never runs past a special
+    // the mini box could still touch)
     const float left = s.x - c.half;
     while (s.specialCursor < static_cast<int>(g.specials.size()) &&
            g.specials[static_cast<size_t>(s.specialCursor)].box.right < left) {
         ++s.specialCursor;
         s.specialDone >>= 1;
     }
-    const float l = s.x - c.half, b = s.y - c.half, r = s.x + c.half,
-                t = s.y + c.half;
+    // The player rect is the engine's CURRENT getObjectRect(): a size
+    // portal in this pass changes it for the specials tested after it
+    // (collisionCheckObjects recomputes the rect per call; Clutterfunk
+    // never packs two activatables into one tick, so the per-call staleness
+    // is unobservable).
     for (int i = s.specialCursor; i < static_cast<int>(g.specials.size()); ++i) {
         const Special& sp = g.specials[static_cast<size_t>(i)];
+        const float half = playerHalf(s, c);
+        const float l = s.x - half, b = s.y - half, r = s.x + half,
+                    t = s.y + half;
         if (sp.box.left > r) break;
         if (!detail::overlaps(l, b, r, t, sp.box)) continue;
         const int k = i - s.specialCursor;
@@ -810,7 +952,10 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
                     : s.ship ? pad::kPinkBumpModShip
                     : s.ball ? pad::kPinkBumpModBall
                              : pad::kPinkBumpModCube;
-                float v = static_cast<float>(sign) * (bumpMod * pad::kBase) * 1.0f;
+                // propellPlayer 0x14039f8c9..: f32(sign) * f32(bumpMod *
+                // 16) * sizeMul (0.8 for the mini)
+                float v = static_cast<float>(sign) * (bumpMod * pad::kBase) *
+                          sizeMul(s);
                 s.yvel = roundVel(static_cast<double>(v));
                 // propellPlayer 0x14039f8eb: ball / spider / swing scale the
                 // result by f64(0.6f) as a raw double write.
@@ -823,13 +968,21 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
                 if (s.upsideDown == target || done) break;
                 if (k < 64) s.specialDone |= uint64_t{1} << k;
                 float v = static_cast<float>(sign) *
-                          (pad::kGravityBumpMod * pad::kBase) * 1.0f;
+                          (pad::kGravityBumpMod * pad::kBase) * sizeMul(s);
                 s.yvel = roundVel(static_cast<double>(v));
                 if (s.ball) s.yvel *= ball::kPadMul;
                 s.onGround = false;
                 s.upsideDown = target;
                 s.yvel *= pad::kFlipDamp;
                 s.sinceFlip = 0;
+                break;
+            }
+            case SpecialKind::SizeNormal:
+            case SpecialKind::SizeMini: {
+                // togglePlayerScale(enable): idempotent, only the size and
+                // the rect scale change (see mini::). The next specials in
+                // this pass already see the new box.
+                s.mini = sp.kind == SpecialKind::SizeMini;
                 break;
             }
             case SpecialKind::GravityNormal:
@@ -873,9 +1026,9 @@ inline void stepSpecials(PlayerState& s, const PhysicsConfig& c,
     // onGround, toggleRollMode (0x39b570) changes no physics field either
     // way. So ball <-> cube keeps yvel and m_isOnGround; ship <-> anything
     // halves and ungrounds.
-    detail::forCandidates(g.portals, s.x, c.half, [&](const Portal& p) {
-        if (!detail::overlaps(s.x - c.half, s.y - c.half, s.x + c.half,
-                              s.y + c.half, p.box))
+    const float ph = playerHalf(s, c);
+    detail::forCandidates(g.portals, s.x, ph, [&](const Portal& p) {
+        if (!detail::overlaps(s.x - ph, s.y - ph, s.x + ph, s.y + ph, p.box))
             return;
         const bool toShip = p.mode == PortalMode::Ship;
         const bool toBall = p.mode == PortalMode::Ball;
@@ -902,17 +1055,18 @@ inline void stepCubeSolids(PlayerState& s, const PhysicsConfig& c,
                            const LevelGeometry& g, float prevY) {
     const double sign = s.upsideDown ? -1.0 : 1.0;
     const double w = static_cast<double>(c.landClip);
+    const float half = playerHalf(s, c); // 15, or 9 for the mini
     const double uNow = sign * static_cast<double>(s.y);
     const double uPrev = sign * static_cast<double>(prevY);
-    const double bottomNow = uNow - c.half, bottomPrev = uPrev - c.half;
+    const double bottomNow = uNow - half, bottomPrev = uPrev - half;
     auto objTopU = [&](const Box& b) {
         return sign > 0 ? static_cast<double>(b.top) : -static_cast<double>(b.bottom);
     };
     auto objBotU = [&](const Box& b) {
         return sign > 0 ? static_cast<double>(b.bottom) : -static_cast<double>(b.top);
     };
-    const float l = s.x - c.half, b0 = s.y - c.half, r = s.x + c.half,
-                t0 = s.y + c.half;
+    const float l = s.x - half, b0 = s.y - half, r = s.x + half,
+                t0 = s.y + half;
 
     if (sign * s.yvel <= 0.0) {
         // landing: highest eligible gravity-side face
@@ -920,7 +1074,7 @@ inline void stepCubeSolids(PlayerState& s, const PhysicsConfig& c,
         double best = 0.0;
         const Box* contacts[8];
         int nContacts = 0;
-        detail::forCandidates(g.solids, s.x, c.half, [&](const Box& b) {
+        detail::forCandidates(g.solids, s.x, half, [&](const Box& b) {
             if (!detail::overlaps(l, b0, r, t0, b)) return;
             double oTop = objTopU(b), oBot = objBotU(b);
             bool landElig = bottomNow + w >= oTop || bottomPrev + w >= oTop;
@@ -931,7 +1085,8 @@ inline void stepCubeSolids(PlayerState& s, const PhysicsConfig& c,
             if (nContacts < 8) contacts[nContacts++] = &b;
         });
         if (found) {
-            s.y = static_cast<float>(sign * (best + c.half));
+            // 0x14039386b: y = objTop + rect.h * 0.5 (the scaled outer box)
+            s.y = static_cast<float>(sign * (best + half));
             s.yvel = 0.0;
             s.onGround = true;
             // Landing-pattern x snap (GD 2.2 jump-consistency mechanic; the
@@ -954,9 +1109,12 @@ inline void stepCubeSolids(PlayerState& s, const PhysicsConfig& c,
                 for (int j = i; j > 0 &&
                      contacts[j]->order > contacts[j - 1]->order; --j)
                     std::swap(contacts[j], contacts[j - 1]);
-            const float l2 = s.x - c.half, b2 = s.y - c.half,
-                        r2 = s.x + c.half, t2 = s.y + c.half;
+            const float l2 = s.x - half, b2 = s.y - half,
+                        r2 = s.x + half, t2 = s.y + half;
             const float ys = static_cast<float>(sign);
+            // checkSnapJumpToObject 0x140393de2: the mini's first pattern
+            // is (+90, +30) instead of (+120, +30)
+            const float dx1 = s.mini ? mini::kSnapDx1 : 120.0f;
             for (int i = 0; i < nContacts; ++i) {
                 const Box& b = *contacts[i];
                 if (objTopU(b) != best) continue;
@@ -967,7 +1125,7 @@ inline void stepCubeSolids(PlayerState& s, const PhysicsConfig& c,
                 if (s.hasPrevLand &&
                     (s.prevLandX != ox || s.prevLandY != oy)) {
                     bool pat =
-                        (std::fabs(ox - (s.prevLandX + 120.0f)) <= 1.0f &&
+                        (std::fabs(ox - (s.prevLandX + dx1)) <= 1.0f &&
                          std::fabs(oy - (s.prevLandY + ys * 30.0f)) <= 1.0f) ||
                         (std::fabs(ox - (s.prevLandX + 150.0f)) <= 1.0f &&
                          std::fabs(oy - (s.prevLandY - ys * 30.0f)) <= 1.0f) ||
@@ -1006,9 +1164,11 @@ inline void stepCubeSolids(PlayerState& s, const PhysicsConfig& c,
 inline void stepShipBand(PlayerState& s, const PhysicsConfig& c) {
     const double sign = s.upsideDown ? -1.0 : 1.0;
     // Band lines from the portal-installed floor (getMinPortalY /
-    // getMaxPortalY): player center in [floor + 15, floor + 300 - 15].
-    const float floorY = s.bandFloor + c.half;
-    const float ceilY = s.bandFloor + 300.0f - c.half;
+    // getMaxPortalY): player center in [floor + half, floor + 300 - half]
+    // (half = 15, or 9 for the mini ship; see mini::).
+    const float half = playerHalf(s, c);
+    const float floorY = s.bandFloor + half;
+    const float ceilY = s.bandFloor + 300.0f - half;
     if (s.y > ceilY) {
         s.y = ceilY;
         if (s.yvel > 0.0) {
@@ -1047,29 +1207,30 @@ inline void stepFlyingSolids(PlayerState& s, const PhysicsConfig& c,
                              const LevelGeometry& g, float prevY, double w) {
     const Box* contacts[16];
     int n = 0;
-    detail::forCandidates(g.solids, s.x, c.half, [&](const Box& b) {
-        if (detail::overlaps(s.x - c.half, s.y - c.half, s.x + c.half,
-                             s.y + c.half, b) && n < 16)
+    const float half = playerHalf(s, c); // 15, or 9 for the mini
+    detail::forCandidates(g.solids, s.x, half, [&](const Box& b) {
+        if (detail::overlaps(s.x - half, s.y - half, s.x + half, s.y + half,
+                             b) && n < 16)
             contacts[n++] = &b;
     });
     for (int i = 1; i < n; ++i)
         for (int j = i; j > 0 && contacts[j]->order > contacts[j - 1]->order;
              --j)
             std::swap(contacts[j], contacts[j - 1]);
-    const double bottomPrev = static_cast<double>(prevY - c.half);
-    const double topPrev = static_cast<double>(prevY + c.half);
+    const double bottomPrev = static_cast<double>(prevY - half);
+    const double topPrev = static_cast<double>(prevY + half);
     for (int i = 0; i < n; ++i) {
         const Box& b = *contacts[i];
         const double oTop = static_cast<double>(b.top);
         const double oBot = static_cast<double>(b.bottom);
-        const double bottomNow = static_cast<double>(s.y - c.half);
-        const double topNow = static_cast<double>(s.y + c.half);
+        const double bottomNow = static_cast<double>(s.y - half);
+        const double topNow = static_cast<double>(s.y + half);
         // block 1: the object's top face is within the window under the
         // player's bottom (world y). A normal-gravity ship lands here; the
         // upside-down ship bumps its head.
         if (bottomNow + w >= oTop || bottomPrev + w >= oTop) {
             if (s.yvel <= 0.0) {
-                s.y = b.top + c.half;
+                s.y = b.top + half;
                 // 0x140393913: bl (the block-1 window flag) picks hitHead
                 // for the flipped modes, hitGround(obj) otherwise; with
                 // yvel <= 0 the latter's sign*yvel > 5 gate never fires.
@@ -1082,7 +1243,7 @@ inline void stepFlyingSolids(PlayerState& s, const PhysicsConfig& c,
         // player's top. A normal-gravity ship bumps its head; the
         // upside-down ship lands (its gravity pulls it up).
         if ((oBot >= topNow - w || oBot >= topPrev - w) && s.yvel >= 0.0) {
-            s.y = b.bottom - c.half;
+            s.y = b.bottom - half;
             // 0x140392fcf: bl = overhead (normal gravity) -> hitHead; the
             // flipped modes land here with hitGround(obj), whose gate
             // sign*yvel > 5 is -yvel > 5, impossible with yvel >= 0.
@@ -1102,8 +1263,9 @@ inline void stepFlyingSolids(PlayerState& s, const PhysicsConfig& c,
 // snap has a post-portal grace (r12 = ceiling-height-changed is 0 in a
 // plain level).
 inline void stepBallBand(PlayerState& s, const PhysicsConfig& c) {
-    const float floorY = s.bandFloor + c.half;
-    const float ceilY = s.bandFloor + ball::kBandHeight - c.half;
+    const float half = playerHalf(s, c);
+    const float floorY = s.bandFloor + half;
+    const float ceilY = s.bandFloor + ball::kBandHeight - half;
     if (s.y > ceilY) {
         s.y = ceilY;
         if (s.yvel > 0.0) hitGround(s);
@@ -1113,8 +1275,11 @@ inline void stepBallBand(PlayerState& s, const PhysicsConfig& c) {
     }
 }
 
-// Deaths, evaluated at the resolved position: inner 9x9 box against solids,
-// full 30x30 box against hazards. Shared by every mode.
+// Deaths, evaluated at the resolved position: inner 9x9 box against solids
+// (unscaled in mini mode, see mini::), the full outer box (30x30, mini
+// 18x18) against rectangular hazards, playerCircleCollision against the
+// circular ones (Box::radius > 0, see circleHitsPlayer). Shared by every
+// mode.
 //
 // collidedWithObjectInternal's inner-box death (0x140393622..) has one
 // escape (0x140393675..0x14039372a): within 0.1 s of a gravity flip
@@ -1130,14 +1295,15 @@ inline void checkDeaths(PlayerState& s, const PhysicsConfig& c,
                         const LevelGeometry& g, float prevY) {
     const double w = s.ship ? ship::kSnapWindow : static_cast<double>(c.landClip);
     const bool flipGrace = s.sinceFlip < pad::kFlipFloorGraceTicks;
+    const float half = playerHalf(s, c);
     detail::forCandidates(g.solids, s.x, c.inner, [&](const Box& b) {
         if (s.dead) return;
         if (!detail::overlaps(s.x - c.inner, s.y - c.inner, s.x + c.inner,
                               s.y + c.inner, b))
             return;
         if (flipGrace) {
-            const double bottomNow = static_cast<double>(s.y - c.half);
-            const double bottomPrev = static_cast<double>(prevY - c.half);
+            const double bottomNow = static_cast<double>(s.y - half);
+            const double bottomPrev = static_cast<double>(prevY - half);
             const double oTop = static_cast<double>(b.top);
             const double oBot = static_cast<double>(b.bottom);
             bool bl;
@@ -1146,18 +1312,25 @@ inline void checkDeaths(PlayerState& s, const PhysicsConfig& c,
             else
                 bl = bottomNow + w >= oTop || bottomPrev + w >= oTop;
             if (bl) {
-                s.y = s.upsideDown ? b.top + c.half : b.bottom - c.half;
+                s.y = s.upsideDown ? b.top + half : b.bottom - half;
                 hitGround(s);
                 return;
             }
         }
         s.dead = true;
     });
-    detail::forCandidates(g.hazards, s.x, c.half, [&](const Box& b) {
-        if (detail::overlaps(s.x - c.half, s.y - c.half, s.x + c.half,
-                             s.y + c.half, b))
+    // checkCollisions' hazard loop (0x1402147c0..): every collected hazard
+    // is tested against the player's outer rect, or against the circle
+    // when m_objectRadius > 0 (0x1402147ed -> playerCircleCollision).
+    detail::forCandidates(g.hazards, s.x, half, [&](const Box& b) {
+        if (b.radius > 0.0f) {
+            if (circleHitsPlayer(s.x, s.y, half, b.cx, b.cy, b.radius))
+                s.dead = true;
+        } else if (detail::overlaps(s.x - half, s.y - half, s.x + half,
+                                    s.y + half, b)) {
             s.dead = true;
-    });
+        }
+    }, detail::kHazardMaxW);
 }
 
 } // namespace gdcore

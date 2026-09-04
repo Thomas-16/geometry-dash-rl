@@ -35,7 +35,38 @@ struct Row {
     double yvel;
     int holding, onground, upsidedown, ship, dead;
     float realx, realy;
+    // m_vehicleSize != 1 (the `mini` column, mods built from 2026-09-04
+    // on; -1 when the trace predates it and the sim's flag is not checked)
+    int mini;
 };
+
+// Index of a named column in the CSV header row, or -1.
+int columnIndex(const char* header, const char* name) {
+    int idx = 0;
+    const char* p = header;
+    const size_t n = std::strlen(name);
+    while (*p) {
+        const char* e = p;
+        while (*e && *e != ',' && *e != '\n' && *e != '\r') ++e;
+        if ((size_t)(e - p) == n && std::strncmp(p, name, n) == 0) return idx;
+        if (*e != ',') break;
+        p = e + 1;
+        ++idx;
+    }
+    return -1;
+}
+
+// The idx-th comma-separated field of a line as an int (-1 if absent).
+int intField(const char* line, int idx) {
+    if (idx < 0) return -1;
+    const char* p = line;
+    for (int i = 0; i < idx; ++i) {
+        p = std::strchr(p, ',');
+        if (!p) return -1;
+        ++p;
+    }
+    return std::atoi(p);
+}
 
 std::vector<Row> loadTrace(const char* path) {
     std::vector<Row> rows;
@@ -50,8 +81,11 @@ std::vector<Row> loadTrace(const char* path) {
         std::exit(2);
     }
     std::fgets(line, sizeof line, f); // header row
+    // Trailing columns are looked up by name so the two mods can append
+    // diagnostics in different orders.
+    const int miniCol = columnIndex(line, "mini");
     while (std::fgets(line, sizeof line, f)) {
-        // src,tick,x,y,yvel,holding,onground,upsidedown,ship,dead,speed,dt,halftick,lasttick,nodex,realx,realy,totaltime
+        // src,tick,x,y,yvel,holding,onground,upsidedown,ship,dead,speed,dt,halftick,lasttick,nodex,realx,realy,totaltime[,...]
         int src, holding, onground, upsidedown, ship, dead, halftick, lasttick;
         unsigned long long tick;
         double x, y, yvel, speed, dt, nodex, realx, realy, totaltime;
@@ -62,7 +96,8 @@ std::vector<Row> loadTrace(const char* path) {
             &realy, &totaltime);
         if (n != 18 || src != 0) continue;
         rows.push_back(Row{tick, yvel, holding, onground, upsidedown, ship,
-                           dead, (float)realx, (float)realy});
+                           dead, (float)realx, (float)realy,
+                           intField(line, miniCol)});
     }
     std::fclose(f);
     return rows;
@@ -89,6 +124,7 @@ int checkTrace(const char* path, const gdcore::LevelGeometry& geom,
     s.ship = rows[0].ship == 1;
     s.ball = rows[0].ship == 2;
     s.upsideDown = rows[0].upsidedown != 0;
+    s.mini = rows[0].mini == 1;
 
     // GD_TRACE_DEBUG=<from>:<to> prints the sim state for ticks in that
     // range (before the comparison) plus the solids/hazards within 60 units
@@ -145,13 +181,14 @@ int checkTrace(const char* path, const gdcore::LevelGeometry& geom,
         }
         gdcore::step(s, cfg, geom, r.holding != 0);
         if (dbgTo && r.tick >= dbgFrom && r.tick <= dbgTo)
-            std::printf("t=%llu hold=%d | sim x=%.9g y=%.9g yvel=%.17g og=%d ud=%d hjh=%d ih=%d mh=%d mode=%s dead=%d"
-                        " | real x=%.9g y=%.9g yvel=%.17g og=%d\n",
+            std::printf("t=%llu hold=%d | sim x=%.9g y=%.9g yvel=%.17g og=%d ud=%d hjh=%d ih=%d mh=%d mode=%s%s dead=%d"
+                        " | real x=%.9g y=%.9g yvel=%.17g og=%d mini=%d\n",
                         (unsigned long long)r.tick, r.holding, s.x, s.y, s.yvel,
                         (int)s.onGround, (int)s.upsideDown, (int)s.hasJustHeld,
                         (int)s.inputHeld, (int)s.holding,
-                        s.ship ? "ship" : s.ball ? "ball" : "cube", (int)s.dead,
-                        r.realx, r.realy, r.yvel, r.onground);
+                        s.ship ? "ship" : s.ball ? "ball" : "cube",
+                        s.mini ? "(mini)" : "", (int)s.dead,
+                        r.realx, r.realy, r.yvel, r.onground, r.mini);
         const int simMode = s.ship ? 1 : s.ball ? 2 : 0;
         if (simMode != r.ship) {
             std::printf(
@@ -159,6 +196,14 @@ int checkTrace(const char* path, const gdcore::LevelGeometry& geom,
                 "sim mode=%d real mode=%d (0 cube, 1 ship, 2 ball; x=%.9g y=%.9g)\n",
                 path, (unsigned long long)r.tick, (unsigned long long)matched,
                 simMode, r.ship, s.x, s.y);
+            return 1;
+        }
+        if (r.mini >= 0 && (s.mini ? 1 : 0) != r.mini) {
+            std::printf(
+                "%s: SIZE MISMATCH at tick %llu after %llu matched ticks: "
+                "sim mini=%d real mini=%d (x=%.9g y=%.9g)\n",
+                path, (unsigned long long)r.tick, (unsigned long long)matched,
+                (int)s.mini, r.mini, s.x, s.y);
             return 1;
         }
         if (s.upsideDown != (r.upsidedown != 0)) {

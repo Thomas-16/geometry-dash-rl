@@ -134,14 +134,84 @@ namespace {
 //     8.944 * 0.7 * 0.5 = 3.1304 kick with the flip. The cube path (the
 //     ring at x 15075 sits under a spiked ceiling row, off the normal
 //     route) is disassembly-only but shares everything except the 0.7.
+//
+// Clutterfunk (level 11) adds 23 ids (disassembly only until the level-11
+// objects.csv dump exists; every case below was read from the three
+// customSetup id switches, GameObject::createWithKey's class switch
+// (0x14018b7d0: byte table 0x14018d298 / jump table 0x14018d280, id-10) and
+// EnhancedGameObject::customSetup (0x1401a4f70: byte table 0x1401a639c /
+// jump table 0x1401a6388, id-85)):
+//   - 76 / 77 / 78 / 81 (lightsquare_04_02, a 20x2 trimmed frame with a
+//     20x30 source) and 82 (lightsquare_04_sideLine, 2x20): main switch
+//     case 153 (plain, type 0 Solid) and the THIRD switch sends all five
+//     to 0x140193f74, m_width = m_height = 30.0f - 30x30 solids exactly
+//     like xStep's 69-75. 80 (square_d_05): main case 0 (0x14019371e) =
+//     Decoration like ids 5 / 73 (also forced 30x30) - no collision.
+//   - 90 / 91 / 92 / 93 / 95 (blockOutline_01 / lightsquare_01_02 /
+//     blockOutline_03 / _06 / _04): main switch case 23 (0x14019378c) sets
+//     m_objectType 0 (Solid) + the +0x411 / +0x284 flags and jumps to
+//     0x140193cfb = m_width = m_height = 30.0f; 96 (blockOutline_05): case
+//     25 (0x140193779), the same without +0x284. So the 2x2 / 30x2 / 2x30
+//     trimmed frames never reach the hitbox: all six are 30x30 solids (the
+//     same frames as 69-75 under a second color channel).
+//   - 60 (d_ball_06): main case 19 (0x14019228c) = Decoration like 50-53.
+//   - 85 / 86 / 87 / 97 (d_cogwheel_01/02/03/04): createWithKey builds an
+//     EnhancedGameObject (case 0x14018d197); its customSetup case
+//     0x1401a51cb sets type 7 Decoration and a rotation action. No
+//     collision.
+//   - 88 / 89 / 98 = SAWBLADES (sawblade_01/02/03): EnhancedGameObject,
+//     customSetup case 0x1401a5bd9: m_objectType = 2 (Hazard) and
+//     m_objectRadius (+0x38c) = m_width * 0.3f by default, then per id:
+//     88 -> the constant 0x42013333 = 32.3f (0x1401a5cd5); 89 -> m_width *
+//     0.36f (0x1401a5d03, .rdata 0x140622ac0) with sawblade_02_001 = 60x60
+//     untrimmed -> 21.6; 98 keeps m_width * 0.3f (0x140622aa0) with
+//     sawblade_03_001 = 40x40 -> 12. The rest of the case (0x1401a5c91..)
+//     is the spin animation (0x1401a7280 with 300 deg/s) - the radius
+//     never changes, and GameObject::updateIsOriented (0x1401a1730)
+//     returns before setting m_shouldUseOuterOb when +0x38c > 0, so a
+//     sawblade is a pure circle for collision: checkCollisions' hazard loop
+//     (0x1402147c0..) calls GJBaseGameLayer::playerCircleCollision
+//     (0x140211df0) for any object with +0x38c > 0 instead of the rect
+//     test - see gdcore::circleHitsPlayer. The table stores the bounding
+//     square (2r x 2r) plus the radius. None of Clutterfunk's sawblades is
+//     scaled (no key 32), so the m_scaleX/m_scaleY max() in
+//     playerCircleCollision is 1.0. OpenGD's community table lists 32.3 /
+//     21.6 / 12; the engine's third value is 11.775 (see kSawRadius98).
+//   - 99 / 101 = the SIZE PORTALS (see SpecialKind::SizeNormal / SizeMini
+//     in geometry.hpp): EffectGameObjects (case 0x14018d22a, like the
+//     mode / gravity portals) typed 17 / 18. Hitbox 31x90, CONFIRMED by
+//     traces/session23/objects.csv (type 17 / 18, rect 31x90).
+//   - 104 (the 1.x line-color trigger, placed in a stack with 29 / 30
+//     triggers at y 405..525): createWithKey takes the default path
+//     (GameObject::createWithFrame with the ObjectToolbox frame for the
+//     key), but ObjectToolbox::init (0x140348d70) registers keys 28 / 29 /
+//     30 / 105 / ... and never 104, so the frame lookup is empty and
+//     createWithKey returns null (0x14018b829): the four id-104 objects do
+//     not exist in the loaded level (confirmed: no id-104 row in the
+//     session23 dump).
 struct HitboxSpec {
     int id;
     char kind; // 's' solid, 'h' hazard, 'p' yellow pad, 'g' gravity pad,
                // 'n' normal-gravity portal, 'f' flip-gravity portal,
                // 'r' yellow jump ring, 'k' pink jump pad, 'q' pink jump ring,
-               // 'v' gravity ring
+               // 'v' gravity ring, 'c' circular hazard (w = h = 2 * radius),
+               // 'N' normal-size portal, 'M' mini-size portal
     float w, h;
 };
+
+// Sawblade radii as EnhancedGameObject::customSetup computes them (float
+// multiplies of the untrimmed frame width, see above).
+// CONFIRMED by traces/session23/objects.csv (radius column): 32.2999992 /
+// 21.6000004 / 11.7750006. The last one is NOT 40 * 0.3: the m_width that
+// customSetup multiplies is the TRIMMED rect of the sheet the game actually
+// loads (GJ_GameSheet-uhd, points = pixels / 4): sawblade_03_001 is 157x158
+// there -> 39.25 wide (the 1x sheet's 40x40 is the untrimmed source size),
+// while sawblade_02_001 is 240x240 -> 60 either way. The dump's own w/h
+// column shows 40 for id 98 (rewritten later by setupPixelScale), so the
+// radius must be read from the radius column, never re-derived from w.
+constexpr float kSawRadius88 = 32.3f;          // 0x42013333, explicit
+constexpr float kSawRadius89 = 60.0f * 0.36f;  // sawblade_02_001 60 (uhd 240/4) * 0x140622ac0
+constexpr float kSawRadius98 = 39.25f * 0.3f;  // sawblade_03_001 39.25 (uhd 157/4) * 0x140622aa0
 
 constexpr HitboxSpec kHitboxes[] = {
     {1, 's', 30.0f, 30.0f},  {2, 's', 30.0f, 30.0f}, {3, 's', 30.0f, 30.0f},
@@ -153,16 +223,29 @@ constexpr HitboxSpec kHitboxes[] = {
     {66, 's', 30.0f, 16.0f}, {69, 's', 30.0f, 30.0f}, {70, 's', 30.0f, 30.0f},
     {71, 's', 30.0f, 30.0f}, {72, 's', 30.0f, 30.0f}, {74, 's', 30.0f, 30.0f},
     {75, 's', 30.0f, 30.0f}, {83, 's', 30.0f, 30.0f}, {94, 's', 30.0f, 30.0f},
+    // Clutterfunk solids: lightsquare_04 pieces (forced 30x30 by the third
+    // switch) and the second set of outline pieces (forced 30x30 by their
+    // own main-switch cases), see above
+    {76, 's', 30.0f, 30.0f}, {77, 's', 30.0f, 30.0f}, {78, 's', 30.0f, 30.0f},
+    {81, 's', 30.0f, 30.0f}, {82, 's', 30.0f, 30.0f}, {90, 's', 30.0f, 30.0f},
+    {91, 's', 30.0f, 30.0f}, {92, 's', 30.0f, 30.0f}, {93, 's', 30.0f, 30.0f},
+    {95, 's', 30.0f, 30.0f}, {96, 's', 30.0f, 30.0f},
     {8, 'h', 6.0f, 12.0f},   {9, 'h', 9.0f, 10.8f},  {39, 'h', 6.0f, 5.6f},
     {103, 'h', 4.0f, 7.6f},
     // xStep pit_04: 0.3 x 0.4 of the trimmed 30x18 frame (see above)
     {61, 'h', 30.0f * 0.3f, 18.0f * 0.4f},
+    // Clutterfunk sawblades: circles, the box is the bounding square
+    {88, 'c', 2.0f * kSawRadius88, 2.0f * kSawRadius88},
+    {89, 'c', 2.0f * kSawRadius89, 2.0f * kSawRadius89},
+    {98, 'c', 2.0f * kSawRadius98, 2.0f * kSawRadius98},
     {35, 'p', 25.0f, 4.0f},  {67, 'g', 25.0f, 6.0f},
     {10, 'n', 25.0f, 75.0f}, {11, 'f', 25.0f, 75.0f},
     {36, 'r', 30.0f * 1.2f, 30.0f * 1.2f},
     {140, 'k', 25.0f, 5.0f},
     {141, 'q', 30.0f * 1.2f, 30.0f * 1.2f},
     {84, 'v', 30.0f * 1.2f, 30.0f * 1.2f},
+    // Clutterfunk size portals (99 normal, 101 mini)
+    {99, 'N', 31.0f, 90.0f}, {101, 'M', 31.0f, 90.0f},
 };
 
 const HitboxSpec* findSpec(int id) {
@@ -224,6 +307,20 @@ LevelGeometry LevelGeometry::build(const gd::Level& level) {
         switch (spec->kind) {
             case 's': g.solids.push_back(b); break;
             case 'h': g.hazards.push_back(b); break;
+            case 'c':
+                // circle centered on the object position (playerCircleCollision
+                // uses getRealPosition, never the sprite offset)
+                b.radius = spec->w * 0.5f;
+                b.cx = cx;
+                b.cy = cy;
+                g.hazards.push_back(b);
+                break;
+            case 'N':
+                g.specials.push_back(Special{b, SpecialKind::SizeNormal, false});
+                break;
+            case 'M':
+                g.specials.push_back(Special{b, SpecialKind::SizeMini, false});
+                break;
             case 'p':
                 g.specials.push_back(
                     Special{b, SpecialKind::YellowPad, padIsFlipped(obj)});

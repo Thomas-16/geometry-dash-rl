@@ -356,6 +356,13 @@ void drawHitboxes(const App& app, const Camera2D& cam) {
         DrawRectangleLinesEx(r, lw, Color{80, 200, 255, 230});
     }
     for (const auto& b : app.geom.hazards) {
+        if (b.radius > 0.0f) {
+            // circular hazard (sawblade): the box is only the bounding square
+            Vector2 c{b.cx, -(b.cy - 90.0f)};
+            DrawCircleV(c, b.radius, Color{255, 70, 70, 40});
+            DrawCircleLinesV(c, b.radius, Color{255, 70, 70, 240});
+            continue;
+        }
         Rectangle r = rect(b);
         DrawRectangleRec(r, Color{255, 70, 70, 40});
         DrawRectangleLinesEx(r, lw, Color{255, 70, 70, 240});
@@ -379,6 +386,8 @@ void drawHitboxes(const App& app, const Camera2D& cam) {
             case gdcore::SpecialKind::PinkPad: c = Color{255, 120, 220, 255}; break;
             case gdcore::SpecialKind::PinkRing: c = Color{255, 120, 220, 255}; break;
             case gdcore::SpecialKind::GravityRing: c = Color{90, 170, 255, 255}; break;
+            case gdcore::SpecialKind::SizeNormal: c = Color{110, 240, 110, 255}; break;
+            case gdcore::SpecialKind::SizeMini: c = Color{240, 60, 200, 255}; break;
         }
         DrawRectangleRec(r, Color{c.r, c.g, c.b, 60});
         DrawRectangleLinesEx(r, lw, c);
@@ -485,6 +494,10 @@ void drawPlayer(const App& app, const gdcore::PlayerState& s, float rotationDeg,
     };
     Color pri = fade(primary), sec = fade(secondary);
     Vector2 c{s.x, -(s.y - 90.0f)};
+    // Mini mode scales every player sprite by m_vehicleSize (0.6).
+    const float sizeMul = s.mini ? 0.6f : 1.0f;
+    const float iconScale = app.iconScale * sizeMul;
+    const float ballScale = ballScale * sizeMul;
     // Upside-down cube: the game mirrors the icon vertically; a half-turn is
     // the same picture for the symmetric default cube (presentation only).
     if (s.upsideDown && !s.ship && !s.ball) rotationDeg += 180.0f;
@@ -494,9 +507,9 @@ void drawPlayer(const App& app, const gdcore::PlayerState& s, float rotationDeg,
         // the picture. Secondary layer under primary like the cube.
         if (app.ballFrame2)
             drawFrameAt(app.atlas, *app.ballFrame2, c, rotationDeg,
-                        app.ballScale, sec);
+                        ballScale, sec);
         drawFrameAt(app.atlas, *app.ballFrame1, c, rotationDeg,
-                    app.ballScale, pri);
+                    ballScale, pri);
     } else if (app.useTextures && s.ship && app.shipFrame1) {
         // Ship: the cube rides inside at 0.55 scale, 5 units above center
         // (PlayerObject::createShip), then the ship hull draws over it. Both
@@ -506,38 +519,40 @@ void drawPlayer(const App& app, const gdcore::PlayerState& s, float rotationDeg,
         if (app.playerFrame1) {
             if (app.playerFrame2)
                 drawFrameAt(app.atlas, *app.playerFrame2, cc, rotationDeg,
-                            app.iconScale * 0.55f, sec);
+                            iconScale * 0.55f, sec);
             drawFrameAt(app.atlas, *app.playerFrame1, cc, rotationDeg,
-                        app.iconScale * 0.55f, pri);
+                        iconScale * 0.55f, pri);
         }
         if (app.shipFrame2)
             drawFrameAt(app.atlas, *app.shipFrame2, c, rotationDeg,
-                        app.iconScale, sec);
+                        iconScale, sec);
         drawFrameAt(app.atlas, *app.shipFrame1, c, rotationDeg,
-                    app.iconScale, pri);
+                    iconScale, pri);
     } else if (app.useTextures && app.playerFrame1) {
         // Default cube: secondary layer under primary.
         if (app.playerFrame2)
             drawFrameAt(app.atlas, *app.playerFrame2, c, rotationDeg,
-                        app.iconScale, sec);
+                        iconScale, sec);
         drawFrameAt(app.atlas, *app.playerFrame1, c, rotationDeg,
-                    app.iconScale, pri);
+                    iconScale, pri);
     } else {
-        DrawRectanglePro({c.x, c.y, 30, 30}, {15, 15}, rotationDeg, pri);
+        DrawRectanglePro({c.x, c.y, 30 * sizeMul, 30 * sizeMul}, {15 * sizeMul, 15 * sizeMul}, rotationDeg, pri);
         // outline via rotated corners (screen space, clockwise rotation)
         float t = rotationDeg * DEG2RAD;
         float ct = std::cos(t), st = std::sin(t);
         auto corner = [&](float dx, float dy) {
             return Vector2{c.x + dx * ct - dy * st, c.y + dx * st + dy * ct};
         };
-        Vector2 p[4] = {corner(-15, -15), corner(15, -15), corner(15, 15), corner(-15, 15)};
+        Vector2 p[4] = {corner(-15 * sizeMul, -15 * sizeMul), corner(15 * sizeMul, -15 * sizeMul), corner(15 * sizeMul, 15 * sizeMul), corner(-15 * sizeMul, 15 * sizeMul)};
         for (int i = 0; i < 4; ++i)
             DrawLineEx(p[i], p[(i + 1) % 4], 2.0f, fade(Color{10, 60, 30, 255}));
     }
     if (app.showHitboxes) {
-        // Axis-aligned physics boxes (rotation is cosmetic): 30x30 solid,
-        // 9x9 inner death box (physics.hpp half=15 / inner=4.5).
-        DrawRectangleLinesEx({c.x - 15.0f, c.y - 15.0f, 30.0f, 30.0f}, 1.0f,
+        // Axis-aligned physics boxes (rotation is cosmetic): 30x30 solid
+        // (18x18 in mini mode), 9x9 inner death box in every size
+        // (physics.hpp playerHalf / inner=4.5).
+        const float h = s.mini ? 9.0f : 15.0f;
+        DrawRectangleLinesEx({c.x - h, c.y - h, 2.0f * h, 2.0f * h}, 1.0f,
                              fade(Color{255, 255, 255, 230}));
         DrawRectangleLinesEx({c.x - 4.5f, c.y - 4.5f, 9.0f, 9.0f}, 1.0f,
                              fade(Color{255, 80, 80, 230}));

@@ -42,12 +42,17 @@ constexpr int kGridDim = kGridRows * kGridCols;  // per channel
 // scalar 4 (button) is 0.5 while the physical button is down but
 // m_isHolding is already spent (a ball flip / ball ring consumed it, so a
 // sustained hold is a no-op until a release + press). Levels 1-8 never
-// emit any of these. Scalars 0-23 and the grid layout are frozen —
-// additions bump kObsVersion and only ever append.
+// emit any of these. Obs v5 (Clutterfunk): scalar 26 is appended — the
+// mini flag (m_vehicleSize 0.6: 18x18 box, 8.944 jump, 0.85-divided ship
+// increment, floor line 99) — and the size portals join the specials list
+// (kind +0.9 back to normal size, -0.9 mini); circular hazards (sawblades)
+// enter the hazard grid and the hazard scalars as their bounding squares.
+// Scalars 0-25 and the grid layout are frozen — additions bump kObsVersion
+// and only ever append.
 // gdenv_obs_version() exposes this so the Python side can refuse a stale
 // DLL.
-constexpr int kObsVersion = 4;
-constexpr int kPlayerDim = 26;
+constexpr int kObsVersion = 5;
+constexpr int kPlayerDim = 27;
 constexpr int kObsDim = kPlayerDim + 2 * kGridDim;
 
 namespace detail {
@@ -55,10 +60,10 @@ namespace detail {
 // Accumulate one sorted-by-left box list into a [row][col] cell block.
 inline void rasterize(const std::vector<gdcore::Box>& boxes, float px,
                       float* cells) {
-    // Boxes are at most 34 wide (portal width bounds the table), same slack
-    // as gdcore::detail::forCandidates.
+    // Boxes are at most 66 wide (the sawblade 88 bounding square; every
+    // rectangle is <= 34), same slack as gdcore::detail::kHazardMaxW.
     auto it = std::lower_bound(
-        boxes.begin(), boxes.end(), px - 34.0f,
+        boxes.begin(), boxes.end(), px - 66.0f,
         [](const gdcore::Box& b, float v) { return b.left < v; });
     const float gx1 = px + kLookahead;
     const float gy1 = kGridYBase + kGridRows * kCellH;
@@ -225,6 +230,8 @@ inline void buildObs(const gdcore::PlayerState& s,
                 case gdcore::SpecialKind::PinkPad: sk[k] = 0.75f; break;
                 case gdcore::SpecialKind::PinkRing: sk[k] = -0.25f; break;
                 case gdcore::SpecialKind::GravityRing: sk[k] = -0.75f; break;
+                case gdcore::SpecialKind::SizeNormal: sk[k] = 0.9f; break;
+                case gdcore::SpecialKind::SizeMini: sk[k] = -0.9f; break;
             }
         }
         out[18] = sd[0];
@@ -244,6 +251,8 @@ inline void buildObs(const gdcore::PlayerState& s,
     // while the button is held — the engine would not fire a ring either.)
     out[24] = gdcore::pressableRing(s) >= 0 ? 1.0f : 0.0f;
     out[25] = (s.holding && s.hasJustHeld) ? 1.0f : 0.0f;
+    // Mini flag (obs v5; 0 in every level without size portals).
+    out[26] = s.mini ? 1.0f : 0.0f;
 
     float* grid = out + kPlayerDim;
     std::memset(grid, 0, sizeof(float) * 2 * kGridDim);

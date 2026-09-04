@@ -30,7 +30,14 @@
 // portal, [150, 450] after the last ship portal); traces/session20 (10
 // human attempts to 69%) and traces/session21 (a full macro-bot
 // completion, 19262 ticks, five gravity rings fired, 1010 ball ticks
-// above the old fixed ceiling) match bit-exactly. Every other
+// above the old fixed ceiling) match bit-exactly. Clutterfunk adds the
+// size portals 99 / 101 -> mini mode (physics.hpp mini::), the sawblades
+// 88 / 89 / 98 as circle hazards and more 30x30 solids; traces/session23
+// (runs/level11-1's policy replayed open-loop in the real game: a full
+// completion, 22714 ticks bit-exact in both mods, 8942 mini-cube, 1683
+// mini-ship and 3908 mini-ball ticks over nine size portals, closest
+// sawblade approach 1.7 units) matches bit-exactly, and its objects.csv
+// confirms 31x90 portals and the 32.3 / 21.6 / 11.775 radii. Every other
 // entry renders but its sim is unverified, which the GUI labels loudly.
 #pragma once
 
@@ -56,7 +63,7 @@ inline constexpr LevelInfo kLevels[] = {
     {8, "Time Machine", "TimeMachine", true},
     {9, "Cycles", "Cycles", true},
     {10, "xStep", "xStep", true},
-    {11, "Clutterfunk", "Clutterfunk", false},
+    {11, "Clutterfunk", "Clutterfunk", true},
     {12, "Theory of Everything", "TheoryOfEverything", false},
     {13, "Electroman Adventures", "Electroman", false},
     {14, "Clubstep", "Clubstep", false},

@@ -81,6 +81,36 @@ inline const RenderSpec* renderSpec(int id) {
         {50, {"d_ball_01_001.png"}, -1, Tint::Glow},
         {51, {"d_ball_02_001.png"}, -1, Tint::Glow},
         {53, {"d_ball_04_001.png"}, -1, Tint::Glow},
+        // Clutterfunk: size portals (99 = back to normal, 101 = mini),
+        // sawblades 88/89/98 (circular hazards, radius 32.3 / 21.6 / 11.775),
+        // lightsquare_04 pieces and the second outline set (all 30x30
+        // solids in the engine), the square_d_05 decoration block (engine
+        // type 7 like id 5), cogwheels and d_ball_06 (decoration). Id 104
+        // (the 1.x line-color trigger) is not registered in the object
+        // toolbox, so the engine never creates it.
+        {99, {"portal_08_back_001.png", "portal_08_front_001.png"}, 3, Tint::Obj},
+        {101, {"portal_09_back_001.png", "portal_09_front_001.png"}, 3, Tint::Obj},
+        {88, {"sawblade_01_001.png"}, 2, Tint::Obj},
+        {89, {"sawblade_02_001.png"}, 2, Tint::Obj},
+        {98, {"sawblade_03_001.png"}, 2, Tint::Obj},
+        {76, {"lightsquare_04_02_001.png"}, 1, Tint::Obj},
+        {77, {"lightsquare_04_02_001.png"}, 1, Tint::Obj},
+        {78, {"lightsquare_04_02_001.png"}, 1, Tint::Obj},
+        {81, {"lightsquare_04_02_001.png"}, 1, Tint::Obj},
+        {82, {"lightsquare_04_sideLine_001.png"}, 1, Tint::Obj},
+        {80, {"square_d_05_001.png"}, 1, Tint::Obj},
+        {90, {"blockOutline_01_001.png"}, 1, Tint::Obj},
+        {91, {"lightsquare_01_02_001.png"}, 1, Tint::Obj},
+        {92, {"blockOutline_03_001.png"}, 1, Tint::Obj},
+        {93, {"blockOutline_06_001.png"}, 1, Tint::Obj},
+        {95, {"blockOutline_04_001.png"}, 1, Tint::Obj},
+        {96, {"blockOutline_05_001.png"}, 1, Tint::Obj},
+        {85, {"d_cogwheel_01_001.png"}, -1, Tint::Glow},
+        {86, {"d_cogwheel_02_001.png"}, -1, Tint::Glow},
+        {87, {"d_cogwheel_03_001.png"}, -1, Tint::Glow},
+        {97, {"d_cogwheel_04_001.png"}, -1, Tint::Glow},
+        {60, {"d_ball_06_001.png"}, -1, Tint::Glow},
+        {104, {}, 99, Tint::Obj},  // line color trigger (never created)
         {28, {}, 99, Tint::Obj},  // enter-effect: scale down (xStep)
         {58, {}, 99, Tint::Obj},  // enter-effect: from right half (xStep)
         {59, {}, 99, Tint::Obj},  // enter-effect: from right half, inverted

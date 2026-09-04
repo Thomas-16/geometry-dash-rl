@@ -50,6 +50,7 @@ struct TickRow {
     float realX;
     float realY;
     double totalTime;
+    uint8_t mini;  // m_vehicleSize != 1 (trace_check reads it by header name)
 };
 
 // ------------------------------------------------------------------ solution
@@ -107,12 +108,13 @@ struct Replay {
             auto path = tracesDir() / fmt::format("attempt_{:04}.csv", attempt);
             if (auto* f = std::fopen(path.string().c_str(), "wb")) {
                 std::fputs("format=3\n", f);
-                std::fputs("src,tick,x,y,yvel,holding,onground,upsidedown,ship,dead,speed,dt,halftick,lasttick,nodex,realx,realy,totaltime\n", f);
+                std::fputs("src,tick,x,y,yvel,holding,onground,upsidedown,ship,dead,speed,dt,halftick,lasttick,nodex,realx,realy,totaltime,mini\n", f);
                 for (auto const& r : rows) {
-                    std::fprintf(f, "%u,%llu,%.9g,%.9g,%.17g,%u,%u,%u,%u,%u,%.9g,%.9g,%u,%u,%.9g,%.9g,%.9g,%.17g\n",
+                    std::fprintf(f, "%u,%llu,%.9g,%.9g,%.17g,%u,%u,%u,%u,%u,%.9g,%.9g,%u,%u,%.9g,%.9g,%.9g,%.17g,%u\n",
                         r.src, (unsigned long long)r.tick, r.x, r.y, r.yVel, r.holding,
                         r.onGround, r.upsideDown, r.ship, r.dead, r.speed,
-                        r.dt, r.halfTick, r.lastTick, r.nodeX, r.realX, r.realY, r.totalTime);
+                        r.dt, r.halfTick, r.lastTick, r.nodeX, r.realX, r.realY, r.totalTime,
+                        r.mini);
                 }
                 std::fclose(f);
                 log::info("wrote {} ticks -> {}", rows.size(), path.string());
@@ -234,6 +236,7 @@ void logRow(PlayerObject* p, float dt, bool halfTick, bool lastTick) {
         p->m_playerSpeed, dt, (uint8_t)halfTick, (uint8_t)lastTick,
         p->getPositionX(), p->getRealPosition().x, p->getRealPosition().y,
         p->m_totalTime,
+        (uint8_t)(p->m_vehicleSize != 1.0f),
     });
 }
 
