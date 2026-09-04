@@ -27,7 +27,7 @@ Shape classify(int id) {
             return Shape::SmallSpike;
         case 9:
             return Shape::GroundSpikes;
-        case 12: case 13:
+        case 12: case 13: case 47: case 111:
             return Shape::Portal;
         case 142:
             return Shape::Coin;
@@ -92,9 +92,10 @@ void drawObjectShapes(const gd::Object& o) {
                            localToScreen(o, i * 10.f, 5), Color{230, 60, 60, 255});
             break;
         case Shape::Portal: {
-            Color col = (o.id == 13)   ? Color{240, 120, 220, 255}   // ship-side
-                        : (o.id == 47) ? Color{240, 90, 90, 255}     // ball portal
-                                       : Color{110, 240, 110, 255};  // cube-side
+            Color col = (o.id == 13)    ? Color{240, 120, 220, 255}   // ship-side
+                        : (o.id == 47)  ? Color{240, 90, 90, 255}     // ball portal
+                        : (o.id == 111) ? Color{250, 170, 60, 255}    // UFO portal
+                                        : Color{110, 240, 110, 255};  // cube-side
             Rectangle r{o.x, -o.y, 16, 85};
             DrawRectanglePro(r, {8, 42.5f}, o.rotation, Fade(col, 0.75f));
             DrawText(TextFormat("%d", o.id), (int)o.x - 8, (int)-o.y - 60, 10, col);
@@ -371,6 +372,7 @@ void drawHitboxes(const App& app, const Camera2D& cam) {
         Rectangle r = rect(p.box);
         Color c = p.mode == gdcore::PortalMode::Ship   ? Color{240, 120, 220, 255}
                   : p.mode == gdcore::PortalMode::Ball ? Color{240, 90, 90, 255}
+                  : p.mode == gdcore::PortalMode::Ufo  ? Color{250, 170, 60, 255}
                                                        : Color{110, 240, 110, 255};
         DrawRectangleLinesEx(r, lw, c);
     }
@@ -498,10 +500,31 @@ void drawPlayer(const App& app, const gdcore::PlayerState& s, float rotationDeg,
     const float sizeMul = s.mini ? 0.6f : 1.0f;
     const float iconScale = app.iconScale * sizeMul;
     const float ballScale = ballScale * sizeMul;
+    const float birdScale = app.birdScale * sizeMul;
     // Upside-down cube: the game mirrors the icon vertically; a half-turn is
     // the same picture for the symmetric default cube (presentation only).
-    if (s.upsideDown && !s.ship && !s.ball) rotationDeg += 180.0f;
-    if (app.useTextures && s.ball && app.ballFrame1) {
+    if (s.upsideDown && !s.ship && !s.ball && !s.bird) rotationDeg += 180.0f;
+    if (app.useTextures && s.bird && app.birdFrame1) {
+        // UFO: the cube rides inside the saucer like the ship's, the dome
+        // (frame 3) draws behind it and the hull over it. A flipped UFO is
+        // mirrored vertically in the game; a half-turn is close enough for
+        // the symmetric default saucer.
+        const float rot = rotationDeg + (s.upsideDown ? 180.0f : 0.0f);
+        const float t = rot * DEG2RAD;
+        Vector2 cc{c.x + 5.0f * std::sin(t), c.y - 5.0f * std::cos(t)};
+        if (app.birdFrame3)
+            drawFrameAt(app.atlas, *app.birdFrame3, cc, rot, birdScale, sec);
+        if (app.playerFrame1) {
+            if (app.playerFrame2)
+                drawFrameAt(app.atlas, *app.playerFrame2, cc, rot,
+                            iconScale * 0.55f, sec);
+            drawFrameAt(app.atlas, *app.playerFrame1, cc, rot,
+                        iconScale * 0.55f, pri);
+        }
+        if (app.birdFrame2)
+            drawFrameAt(app.atlas, *app.birdFrame2, c, rot, birdScale, sec);
+        drawFrameAt(app.atlas, *app.birdFrame1, c, rot, birdScale, pri);
+    } else if (app.useTextures && s.ball && app.ballFrame1) {
         // Ball: the ball icon replaces the cube (PlayerObject::createRobot
         // -style swap for toggleRollMode); it rolls, so no gravity flip of
         // the picture. Secondary layer under primary like the cube.

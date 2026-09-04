@@ -119,12 +119,15 @@ int checkTrace(const char* path, const gdcore::LevelGeometry& geom,
     s.onGround = rows[0].onground != 0;
     s.holding = rows[0].holding != 0;
     s.inputHeld = s.holding;
-    // The `ship` column is the mode: 0 cube, 1 ship, 2 ball (trace-logger /
-    // replay-mod builds from 2026-09-02 on; older traces only have 0/1).
+    // The `ship` column is the mode: 0 cube, 1 ship, 2 ball, 3 UFO
+    // (trace-logger / replay-mod builds from 2026-09-02 on, UFO from
+    // 2026-09-04; older traces only have 0/1).
     s.ship = rows[0].ship == 1;
     s.ball = rows[0].ship == 2;
+    s.bird = rows[0].ship == 3;
     s.upsideDown = rows[0].upsidedown != 0;
     s.mini = rows[0].mini == 1;
+    s.rectMini = s.mini;
 
     // GD_TRACE_DEBUG=<from>:<to> prints the sim state for ticks in that
     // range (before the comparison) plus the solids/hazards within 60 units
@@ -186,14 +189,14 @@ int checkTrace(const char* path, const gdcore::LevelGeometry& geom,
                         (unsigned long long)r.tick, r.holding, s.x, s.y, s.yvel,
                         (int)s.onGround, (int)s.upsideDown, (int)s.hasJustHeld,
                         (int)s.inputHeld, (int)s.holding,
-                        s.ship ? "ship" : s.ball ? "ball" : "cube",
+                        s.ship ? "ship" : s.ball ? "ball" : s.bird ? "ufo" : "cube",
                         s.mini ? "(mini)" : "", (int)s.dead,
                         r.realx, r.realy, r.yvel, r.onground, r.mini);
-        const int simMode = s.ship ? 1 : s.ball ? 2 : 0;
+        const int simMode = s.ship ? 1 : s.ball ? 2 : s.bird ? 3 : 0;
         if (simMode != r.ship) {
             std::printf(
                 "%s: MODE MISMATCH at tick %llu after %llu matched ticks: "
-                "sim mode=%d real mode=%d (0 cube, 1 ship, 2 ball; x=%.9g y=%.9g)\n",
+                "sim mode=%d real mode=%d (0 cube, 1 ship, 2 ball, 3 UFO; x=%.9g y=%.9g)\n",
                 path, (unsigned long long)r.tick, (unsigned long long)matched,
                 simMode, r.ship, s.x, s.y);
             return 1;

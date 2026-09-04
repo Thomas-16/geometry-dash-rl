@@ -47,8 +47,10 @@ constexpr int kGridDim = kGridRows * kGridCols;  // per channel
 // increment, floor line 99) — and the size portals join the specials list
 // (kind +0.9 back to normal size, -0.9 mini); circular hazards (sawblades)
 // enter the hazard grid and the hazard scalars as their bounding squares.
-// Scalars 0-25 and the grid layout are frozen — additions bump kObsVersion
-// and only ever append.
+// Theory of Everything (UFO mode) again adds only VALUES: scalar 3 (mode)
+// is +0.5 for the UFO, scalar 7 (next mode portal) -0.5 for a UFO portal;
+// levels 1-11 never emit either. Scalars 0-26 and the grid layout are
+// frozen — additions bump kObsVersion and only ever append.
 // gdenv_obs_version() exposes this so the Python side can refuse a stale
 // DLL.
 constexpr int kObsVersion = 5;
@@ -108,7 +110,7 @@ inline void buildObs(const gdcore::PlayerState& s,
     out[0] = (s.y - 105.0f) / 300.0f; // 0 on ground, 0.9 at ship ceiling
     out[1] = static_cast<float>(s.yvel / 15.0);
     out[2] = s.onGround ? 1.0f : 0.0f;
-    out[3] = s.ship ? 1.0f : s.ball ? -1.0f : 0.0f;
+    out[3] = s.ship ? 1.0f : s.ball ? -1.0f : s.bird ? 0.5f : 0.0f;
     // Previous input state matters: a fresh click and a sustained hold take
     // different paths through gdcore::step. 1 = button down and
     // m_isHolding set (a sustained hold: buffered cube re-jump / ball flip
@@ -127,6 +129,7 @@ inline void buildObs(const gdcore::PlayerState& s,
         portalDist = (it->box.left - s.x) / kLookahead;
         portalType = it->mode == gdcore::PortalMode::Ship   ? 1.0f
                      : it->mode == gdcore::PortalMode::Ball ? 0.5f
+                     : it->mode == gdcore::PortalMode::Ufo  ? -0.5f
                                                             : -1.0f;
     }
     out[6] = portalDist;

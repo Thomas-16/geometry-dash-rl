@@ -77,8 +77,12 @@ struct App {
     const AtlasFrame* shipFrame2 = nullptr;    // ship_01_2_001.png (secondary)
     const AtlasFrame* ballFrame1 = nullptr;    // player_ball_01_001.png (primary)
     const AtlasFrame* ballFrame2 = nullptr;    // player_ball_01_2_001.png (secondary)
+    const AtlasFrame* birdFrame1 = nullptr;    // bird_01_001.png (UFO hull, primary)
+    const AtlasFrame* birdFrame2 = nullptr;    // bird_01_2_001.png (secondary)
+    const AtlasFrame* birdFrame3 = nullptr;    // bird_01_3_001.png (dome)
     float iconScale = 1.0f;     // scales the icon sprite to span 30 units
     float ballScale = 1.0f;     // same for the ball icon (cosmetic; hitbox stays 30x30)
+    float birdScale = 1.0f;     // same for the UFO hull (cosmetic)
     Music music{};              // <song>.mp3 stream (owned by main)
     bool musicLoaded = false;
     float musicOffset = 0.0f;   // song time = sim time + offset

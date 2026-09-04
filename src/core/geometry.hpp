@@ -32,16 +32,16 @@ struct Box {
 // engine-extracted hitbox table (traces/session2/objects.csv, GD 2.2081).
 // Boxes are centered on the object position; rotation by an odd multiple of
 // 90 degrees swaps width/height; flips never change the box.
-// Mode portal (cube 12 / ship 13 / ball 47). Engine hitbox is 34x86
-// centered on the object position (GameObject::getObjectRect from the
-// trace-logger dump for 12/13; 47's customSetup case 0x1401929d6 is the
-// same portal pattern - type 16, the +0x334 (-5,0) offset, the same sprite
-// helper 0x140198b20 - and its portal_07 frames have exactly the portal_03
-// / portal_04 sizes in every sheet, so it is 34x86 too; confirm against the
-// Cycles objects.csv dump). Activation is plain rect overlap with the
-// player's 30x30 box (collisionCheckObjects types 5 / 6 / 16, all gated by
-// canBeActivatedByPlayer).
-enum class PortalMode : uint8_t { Cube, Ship, Ball };
+// Mode portal (cube 12 / ship 13 / ball 47 / UFO 111). Engine hitbox is
+// 34x86 centered on the object position: GameObject::setupSpriteSize
+// (0x1401a36a0, called from customSetup's tail 0x1401946af for every
+// non-decoration object, indexed by id) sends all four ids to the same case
+// 0x1401a3acc, m_width = 34, m_height = 86 — the same table gives every
+// verified size (9 -> 30x27, 61 -> 30x18, 88 -> 44x85, 98 -> 40x40, 99 /
+// 101 -> 31x90, 140 -> 25x5, 103 -> 20x19 ...). Activation is plain rect
+// overlap with the player's box (collisionCheckObjects types 5 / 6 / 16 /
+// 19, all gated by canBeActivatedByPlayer).
+enum class PortalMode : uint8_t { Cube, Ship, Ball, Ufo };
 
 // Flying-band floor set by a ship / ball portal (xStep, 2026-09-03). The
 // engine centers the flying band on the PORTAL, not on the ground:
@@ -49,7 +49,7 @@ enum class PortalMode : uint8_t { Cube, Ship, Ball };
 // (0x213180) -> animateInDualGroundNew (0x213370) computes
 //   center = max(90, floorf((portal.startPos.y - H/2) / 30) * 30) + H/2
 // (0x140213429..0x140213471, floorf = the CRT import, H = the mode's
-// getGroundHeightForMode: ship 300, ball 240) into GJGameState +0x308 and
+// getGroundHeightForMode: ship 300, UFO 300, ball 240) into GJGameState +0x308 and
 // H into +0x2ec, and checkCollisions' band snaps read getMinPortalY /
 // getMaxPortalY (0x213690 / 0x213770): floor = max(90, center - H/2),
 // ceiling = floor + H. Verified 2026-09-03 by logging both getters per
@@ -62,7 +62,7 @@ enum class PortalMode : uint8_t { Cube, Ship, Ball };
 struct Portal {
     Box box;
     PortalMode mode;
-    float bandFloor; // Ship / Ball: the band floor this portal installs
+    float bandFloor; // Ship / Ball / Ufo: the band floor this portal installs
 };
 
 // Activatable objects handled inside GJBaseGameLayer::collisionCheckObjects

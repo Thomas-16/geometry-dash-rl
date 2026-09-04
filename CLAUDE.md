@@ -14,8 +14,8 @@ MSYS2 UCRT64 (g++/cmake/ninja on PATH): `cmake -S . -B build -G Ninja && cmake -
 - GD install: `S:\SteamLibrary\steamapps\common\Geometry Dash\`; levels at `Resources\levels\<id>.txt` (URL-safe base64 of gzip). Levels 1–11 are trace-verified.
 - **Never commit level data or extracted game assets.** Read from the install at runtime.
 - Tools take `GD_LEVEL_PATH` (default `levels/1.txt`); trainer/eval take `--level <path>`.
-- Smoke test (`build/dump.exe <level>`): objects/ids = 1: 2291/31, 2: 1545/26, 3: 1531/35, 4: 1444/30, 5: 2146/35, 6: 1704/33, 7: 2813/34, 8: 3599/36, 9: 3921/40, 10: 4716/58, 11: 4863/66.
-- **Hitboxes come from an `objects.csv` dump** (the trace logger writes one on level load), never from sprite frame sizes or the viewer's shape table. Circular hazards: read the `radius` column (the engine's m_width at setup time is the **-uhd** trimmed rect / 4, e.g. sawblade 98 = 39.25 → 11.775, not the 1x sheet's 40).
+- Smoke test (`build/dump.exe <level>`): objects/ids = 1: 2291/31, 2: 1545/26, 3: 1531/35, 4: 1444/30, 5: 2146/35, 6: 1704/33, 7: 2813/34, 8: 3599/36, 9: 3921/40, 10: 4716/58, 11: 4863/66, 12: 4345/92.
+- **Hitboxes come from an `objects.csv` dump** (the trace logger writes one on level load), never from sprite frame sizes or the viewer's shape table. Before a dump exists, the engine's own per-id size table `GameObject::setupSpriteSize` (0x1401a36a0, decode with the byte table 0x1401a3fec / jump table 0x1401a3f2c, id−1) is the authority for rect sizes — it reproduces every dumped w/h. Circular hazards: read the `radius` column (the radius is computed inside customSetup BEFORE that table runs, from the **-uhd** trimmed rect / 4, e.g. sawblade 98 = 39.25 → 11.775, not the table's 40).
 
 ## Trace regression (run after touching the sim)
 
@@ -34,6 +34,7 @@ Every trace must MATCH incl. death ticks, with no `[onground mismatches ...]` su
 | 9 | `... 9.txt ... traces/session16/attempt_*.csv traces/session17/attempt_*.csv traces/session1[789]/logger_attempt_0001.csv traces/session1[89]/attempt_0001.csv` |
 | 10 | `... 10.txt ... traces/session20/attempt_*.csv traces/session21/attempt_0001.csv traces/session22/attempt_0001.csv traces/session22/logger_attempt_0001.csv` |
 | 11 | `... 11.txt ... traces/session23/attempt_0001.csv traces/session23/logger_attempt_0001.csv` |
+| 12 | `... 12.txt ... traces/session24/logger_attempt_0001.csv` |
 
 ## Architecture rules
 

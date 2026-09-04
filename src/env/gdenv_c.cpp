@@ -250,7 +250,7 @@ GDENV_API void gdenv_get_render_states(const GdEnv* env, float* out) {
         row[0] = s.x;
         row[1] = s.y;
         row[2] = static_cast<float>(s.yvel);
-        row[3] = s.ship ? 1.0f : s.ball ? 2.0f : 0.0f; // mode: 0 cube, 1 ship, 2 ball
+        row[3] = s.ship ? 1.0f : s.ball ? 2.0f : s.bird ? 3.0f : 0.0f; // mode: 0 cube, 1 ship, 2 ball, 3 UFO
         row[4] = s.dead ? 1.0f : 0.0f;
     }
 }
@@ -325,9 +325,15 @@ GDENV_API int32_t gdenv_replay(GdEnv* env, int32_t k, const uint8_t* holds,
             // release tick before the flip's press, so [0, 1] at such a
             // decision is action 1 (a walk from that state records four
             // zeros). Never observed in training episodes, but SIL's replay
-            // must not diverge if it happens.
+            // must not diverge if it happens. The UFO tap macro has the
+            // same shape: a UFO whose button is still down (a ship / cube
+            // hold carried through the portal) records a release tick
+            // before the tap's press.
             if (!hold && e.s.ball && !e.s.ship && e.s.onGround &&
                 e.s.inputHeld && !e.s.holding && cursor + 1 < len &&
+                h[cursor + 1] != 0)
+                hold = true;
+            if (!hold && e.s.bird && e.s.inputHeld && cursor + 1 < len &&
                 h[cursor + 1] != 0)
                 hold = true;
             const bool rec = t < max_steps;
@@ -411,6 +417,9 @@ GDENV_API int32_t gdenv_trace_states(GdEnv* env, const uint8_t* holds,
         bool hold = holds[cursor] != 0;
         if (!hold && e.s.ball && !e.s.ship && e.s.onGround && e.s.inputHeld &&
             !e.s.holding && cursor + 1 < len && holds[cursor + 1] != 0)
+            hold = true;
+        if (!hold && e.s.bird && e.s.inputHeld && cursor + 1 < len &&
+            holds[cursor + 1] != 0)
             hold = true;
         gdenv::StepResult r =
             e.step(hold, env->cfg, env->geom, env->ecfg, env->endX);

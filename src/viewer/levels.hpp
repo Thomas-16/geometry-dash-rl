@@ -37,8 +37,14 @@
 // completion, 22714 ticks bit-exact in both mods, 8942 mini-cube, 1683
 // mini-ship and 3908 mini-ball ticks over nine size portals, closest
 // sawblade approach 1.7 units) matches bit-exactly, and its objects.csv
-// confirms 31x90 portals and the 32.3 / 21.6 / 11.775 radii. Every other
-// entry renders but its sim is unverified, which the GUI labels loudly.
+// confirms 31x90 portals and the 32.3 / 21.6 / 11.775 radii. Theory of
+// Everything adds the UFO portal id 111 and UFO mode (physics.hpp ufo::),
+// the pit_b hazard 135 (14.1x20 from GameObject::setupSpriteSize) and
+// more 30x30 solids (core/geometry.cpp); traces/session24 (a full
+// completion, 19681 ticks incl. 4802 UFO ticks, both UFO sections, the
+// mini UFO) matches bit-exactly after the cached-collision-rect fix
+// (PlayerState::rectMini). Every other entry renders but its sim is
+// unverified, which the GUI labels loudly.
 #pragma once
 
 #include <cstddef>
@@ -64,7 +70,7 @@ inline constexpr LevelInfo kLevels[] = {
     {9, "Cycles", "Cycles", true},
     {10, "xStep", "xStep", true},
     {11, "Clutterfunk", "Clutterfunk", true},
-    {12, "Theory of Everything", "TheoryOfEverything", false},
+    {12, "Theory of Everything", "TheoryOfEverything", true},
     {13, "Electroman Adventures", "Electroman", false},
     {14, "Clubstep", "Clubstep", false},
     {15, "Electrodynamix", "Electrodynamix", false},

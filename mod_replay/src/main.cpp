@@ -231,8 +231,9 @@ void logRow(PlayerObject* p, float dt, bool halfTick, bool lastTick) {
         p->m_position.x, p->m_position.y, p->m_yVelocity,
         (uint8_t)g_rp.injectedHold, (uint8_t)p->m_isOnGround,
         (uint8_t)p->m_isUpsideDown,
-        // mode column ("ship" in the header): 0 cube, 1 ship, 2 ball
-        (uint8_t)(p->m_isShip ? 1 : (p->m_isBall ? 2 : 0)), (uint8_t)p->m_isDead,
+        // mode column ("ship" in the header): 0 cube, 1 ship, 2 ball, 3 UFO
+        (uint8_t)(p->m_isShip ? 1 : (p->m_isBall ? 2 : (p->m_isBird ? 3 : 0))),
+        (uint8_t)p->m_isDead,
         p->m_playerSpeed, dt, (uint8_t)halfTick, (uint8_t)lastTick,
         p->getPositionX(), p->getRealPosition().x, p->getRealPosition().y,
         p->m_totalTime,

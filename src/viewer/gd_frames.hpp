@@ -115,6 +115,42 @@ inline const RenderSpec* renderSpec(int id) {
         {58, {}, 99, Tint::Obj},  // enter-effect: from right half (xStep)
         {59, {}, 99, Tint::Obj},  // enter-effect: from right half, inverted
         {110, {"d_chain_02_001.png"}, -2, Tint::Glow},
+        // Theory of Everything: the UFO portal (engine type 19, 34x86 like
+        // the other mode portals), the square_f blocks (116-118/121/122 =
+        // 30x30 solids, 120 = decoration like id 5), blockOutline_06 as a
+        // 30x30 solid (119), the big pit_b spikes 135 (engine 14.1x20; the
+        // game picks pit_b_01..04 at random, presentation only), thorns,
+        // bricks, chains, wheels, clouds and sign decorations, and the
+        // 1.x color trigger 105 (invisible).
+        {111, {"portal_10_back_001.png", "portal_10_front_001.png"}, 3, Tint::Obj},
+        {116, {"square_f_01_001.png"}, 1, Tint::Obj},
+        {117, {"square_f_02_001.png"}, 1, Tint::Obj},
+        {118, {"square_f_03_001.png"}, 1, Tint::Obj},
+        {119, {"blockOutline_06_001.png"}, 1, Tint::Obj},
+        {120, {"square_f_05_001.png"}, 1, Tint::Obj},
+        {121, {"square_f_06_001.png"}, 1, Tint::Obj},
+        {122, {"square_f_07_001.png"}, 1, Tint::Obj},
+        {135, {"pit_b_01_001.png"}, 2, Tint::Black},
+        {123, {"d_thorn_01_001.png"}, -1, Tint::Glow},
+        {124, {"d_thorn_02_001.png"}, -1, Tint::Glow},
+        {125, {"d_thorn_03_001.png"}, -1, Tint::Glow},
+        {126, {"d_thorn_04_001.png"}, -1, Tint::Glow},
+        {127, {"d_thorn_05_001.png"}, -1, Tint::Glow},
+        {128, {"d_thorn_06_001.png"}, -1, Tint::Glow},
+        {129, {"d_cloud_03_001.png"}, -1, Tint::Glow},
+        {130, {"d_cloud_04_001.png"}, -1, Tint::Glow},
+        {132, {"d_arrow_01_001.png"}, -1, Tint::Glow},
+        {133, {"d_exmark_01_001.png"}, -1, Tint::Glow},
+        {136, {"d_qmark_01_001.png"}, -1, Tint::Glow},
+        {137, {"d_wheel_01_001.png"}, -1, Tint::Glow},
+        {138, {"d_wheel_02_001.png"}, -1, Tint::Glow},
+        {139, {"d_wheel_03_001.png"}, -1, Tint::Glow},
+        {113, {"d_brick_01_001.png"}, -1, Tint::Glow},
+        {114, {"d_brick_02_001.png"}, -1, Tint::Glow},
+        {115, {"d_brick_03_001.png"}, -1, Tint::Glow},
+        {106, {"d_02_chain_01_001.png"}, -2, Tint::Glow},
+        {107, {"d_02_chain_02_001.png"}, -2, Tint::Glow},
+        {105, {}, 99, Tint::Obj},  // 1.x color trigger (invisible)
         {142, {"secretCoin_01_001.png"}, 3, Tint::Obj},
         {15, {"rod_01_001.png"}, -1, Tint::Obj},
         {16, {"rod_02_001.png"}, -1, Tint::Obj},

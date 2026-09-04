@@ -54,7 +54,7 @@ inline SolveKey solveKeyOf(const gdcore::PlayerState& s) {
               (gdcore::pressableRing(s) >= 0 ? 32u : 0u) |
               (s.ball ? 64u : 0u) | (s.inputHeld ? 128u : 0u) |
               (static_cast<uint32_t>(s.specialDone & 0xffu) << 8) |
-              (s.mini ? (1u << 16) : 0u);
+              (s.mini ? (1u << 16) : 0u) | (s.bird ? (1u << 17) : 0u);
     return k;
 }
 

@@ -189,6 +189,53 @@ namespace {
 //     createWithKey returns null (0x14018b829): the four id-104 objects do
 //     not exist in the loaded level (confirmed: no id-104 row in the
 //     session23 dump).
+// Theory of Everything (level 12) adds 39 ids. Sizes now come from the
+// engine's own per-id table, GameObject::setupSpriteSize (0x1401a36a0:
+// byte table 0x1401a3fec / jump table 0x1401a3f2c, indexed by id - 1),
+// which customSetup calls at its tail (0x1401946af) for every object whose
+// type is not 7 / Decoration — AFTER the id cases, so it overwrites the
+// sprite-rect size commonSetup copied (that is why the dump's w/h columns
+// are integers while a sawblade's radius, computed inside its case, still
+// carries the -uhd trimmed rect). Decoded for every classic id, it
+// reproduces each verified size (see kHitboxes), so it is the authority
+// (CONFIRMED by traces/session24/objects.csv: 111 = type 19, 34x86; 135 =
+// type 2, m_width/m_height 47x50, rect 14.1000004 x 20):
+//   - 111 = portal_10 = the UFO PORTAL: customSetup case 0x140192ba1 sets
+//     m_objectType 19 with the 12 / 13 / 47 field pattern (+0x420 = 10,
+//     +0x464 = 5, +0x468 / +0x424 = 1, the same sprite helper, the same
+//     (-5, 0) +0x334 offset via 0x1401930ea) and setupSpriteSize case
+//     0x1401a3acc -> 34x86 exactly like the other mode portals. The
+//     mechanic (UFO mode) lives in physics.hpp (ufo::).
+//   - 135 = pit_b_01 (the big ground spikes): main-switch case 2
+//     (0x14019237a) like pits 9 / 61 — type 2 Hazard, rect scale +0x394 =
+//     0.3f (width) / +0x398 = 0.4f (height) — and it is one of the three
+//     ids (9 / 135 / 1715) that pick a random display frame there
+//     (pit_b_%02d_001, 1..4, 0x1401923c2..0x140192498, plain cocos
+//     setDisplayFrame through vtable +0x3e0). The random frame never
+//     reaches the hitbox: setupSpriteSize case 0x1401a3bde then writes
+//     m_width = 47, m_height = 50 for every 135 (as it writes 30x27 for
+//     every pit 9, whichever of pit_01..03 it shows — 423 identical rows in
+//     the Stereo Madness dump), so the box is 0.3 * 47 x 0.4 * 50 = 14.1 x
+//     20 centered on the object position. OpenGD's community table agrees.
+//   - 116 / 117 / 118 / 121 / 122 = square_f_01 / 02 / 03 / 06 / 07: main
+//     case 153 (plain Solid) and setupSpriteSize case 0 -> 30x30. 119 =
+//     blockOutline_06 (a 2x2 trimmed frame): main case 21 (0x140193cfb,
+//     m_width = m_height = 30) and setupSpriteSize 30x30 — a 30x30 solid
+//     like xStep's 72. 120 = square_f_05: main case 0 (0x14019371e) =
+//     type 7 Decoration like ids 5 / 73 / 80 — no collision.
+//   - Decoration (type 7), no collision: 15 / 16 / 17 (rod_01..03, case 7
+//     0x14019222c), 41 (chain_01), 110 (d_chain_02), 113 / 114 / 115
+//     (d_brick_01..03), 129 / 130 (d_cloud_03/04) — all case 8
+//     (0x1401922cc -> 0x14019266e, type 7); 54 (d_ball_05, case 19), 106 /
+//     107 (d_02_chain_01/02, case 18); 123..128 (d_thorn_01..06, case 29
+//     0x14019131f); 132 / 133 / 136 (d_arrow_01, d_exmark_01, d_qmark_01,
+//     case 30 0x14019230a); 137 / 138 / 139 (d_wheel_01..03):
+//     EnhancedGameObject (createWithKey case 0x14018d197), its customSetup
+//     case 0x1401a4fe2 sets type 7 plus a rotation action.
+//   - Triggers, no collision: 23 / 27 (enter-effect, createWithKey class
+//     case 0x14018c7be, main case 9), 29 / 30 / 105 (color triggers,
+//     EffectGameObject, main case 9 like 22 / 24 / 25 / 26 / 28 / 58 / 59).
+//     104 is placed seven times and never created (see above).
 struct HitboxSpec {
     int id;
     char kind; // 's' solid, 'h' hazard, 'p' yellow pad, 'g' gravity pad,
@@ -230,10 +277,16 @@ constexpr HitboxSpec kHitboxes[] = {
     {81, 's', 30.0f, 30.0f}, {82, 's', 30.0f, 30.0f}, {90, 's', 30.0f, 30.0f},
     {91, 's', 30.0f, 30.0f}, {92, 's', 30.0f, 30.0f}, {93, 's', 30.0f, 30.0f},
     {95, 's', 30.0f, 30.0f}, {96, 's', 30.0f, 30.0f},
+    // Theory of Everything solids: square_f blocks and blockOutline_06
+    // (setupSpriteSize 30x30, see above)
+    {116, 's', 30.0f, 30.0f}, {117, 's', 30.0f, 30.0f}, {118, 's', 30.0f, 30.0f},
+    {119, 's', 30.0f, 30.0f}, {121, 's', 30.0f, 30.0f}, {122, 's', 30.0f, 30.0f},
     {8, 'h', 6.0f, 12.0f},   {9, 'h', 9.0f, 10.8f},  {39, 'h', 6.0f, 5.6f},
     {103, 'h', 4.0f, 7.6f},
     // xStep pit_04: 0.3 x 0.4 of the trimmed 30x18 frame (see above)
     {61, 'h', 30.0f * 0.3f, 18.0f * 0.4f},
+    // Theory of Everything pit_b: 0.3 x 0.4 of setupSpriteSize's 47x50
+    {135, 'h', 47.0f * 0.3f, 50.0f * 0.4f},
     // Clutterfunk sawblades: circles, the box is the bounding square
     {88, 'c', 2.0f * kSawRadius88, 2.0f * kSawRadius88},
     {89, 'c', 2.0f * kSawRadius89, 2.0f * kSawRadius89},
@@ -277,7 +330,8 @@ LevelGeometry LevelGeometry::build(const gd::Level& level) {
     int order = 0;
     for (const auto& obj : level.objects) {
         ++order;
-        bool portal = obj.id == 12 || obj.id == 13 || obj.id == 47;
+        bool portal = obj.id == 12 || obj.id == 13 || obj.id == 47 ||
+                      obj.id == 111;
         const HitboxSpec* spec = findSpec(obj.id);
         if (!spec && !portal) continue;
         float w = portal ? 34.0f : spec->w;
@@ -290,14 +344,15 @@ LevelGeometry LevelGeometry::build(const gd::Level& level) {
         Box b{cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f,
               order};
         if (portal) {
-            PortalMode mode = obj.id == 13   ? PortalMode::Ship
-                              : obj.id == 47 ? PortalMode::Ball
-                                             : PortalMode::Cube;
+            PortalMode mode = obj.id == 13    ? PortalMode::Ship
+                              : obj.id == 47  ? PortalMode::Ball
+                              : obj.id == 111 ? PortalMode::Ufo
+                                              : PortalMode::Cube;
             // animateInDualGroundNew: floorf((startY - H/2) / 30) * 30,
             // floored at 90 (see the Portal note in geometry.hpp).
             float bandFloor = 90.0f;
             if (mode != PortalMode::Cube) {
-                const float H = mode == PortalMode::Ship ? 300.0f : 240.0f;
+                const float H = mode == PortalMode::Ball ? 240.0f : 300.0f;
                 float v = std::floor((cy - H * 0.5f) / 30.0f) * 30.0f;
                 bandFloor = std::max(90.0f, v);
             }

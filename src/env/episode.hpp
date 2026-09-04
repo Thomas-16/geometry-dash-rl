@@ -29,6 +29,14 @@
 //     grounded ball whose button is still down first releases for one tick
 //     (the real game needs release + press to flip again). Airborne, hold
 //     buffers a flip on landing exactly like the cube's re-jump.
+//   - UFO mode (Theory of Everything) is tap-driven: a fresh press boosts
+//     once (m_hasJustHeld is consumed) and holding does nothing more, so
+//     action 1 = one TAP over ticksPerAction ticks — a release tick first
+//     if the button is still down from a previous mode, then a one-tick
+//     press, then releases — and action 0 = release for ticksPerAction
+//     ticks. Every UFO decision therefore ends with the button up, and a
+//     tap at a decision where a ring is pressable fires the ring instead
+//     of boosting (pushButton's order), exactly like the real game.
 // Steps have variable duration; StepResult.ticks feeds SMDP discounting
 // (gamma^ticks) in the trainer. Per-tick holds are recorded so an episode
 // replays exactly.
@@ -93,7 +101,18 @@ struct EnvInstance {
             return false;
         };
 
-        if (!s.ship && s.onGround && hold) {
+        auto modeOf = [](const gdcore::PlayerState& p) {
+            return p.ship ? 1 : p.ball ? 2 : p.bird ? 3 : 0;
+        };
+        if (s.bird) {
+            // UFO tap macro (see above): [release if held], press, releases.
+            const int startMode = modeOf(s);
+            const int pressTick = s.inputHeld ? 1 : 0; // release first if held
+            for (int i = 0; i < cfg.ticksPerAction; ++i) {
+                if (tickOnce(hold && i == pressTick)) goto done;
+                if (modeOf(s) != startMode) break;
+            }
+        } else if (!gdcore::flying(s) && s.onGround && hold) {
             // Hop macro: click, then ballistic flight to the next decision
             // point (landing, mode switch, or end). A ball whose press was
             // already spent (button down, m_isHolding clear) releases for
@@ -101,22 +120,24 @@ struct EnvInstance {
             if (s.ball && s.inputHeld && !s.holding) {
                 if (tickOnce(false)) goto done;
             }
-            bool wasShip = false;
-            while (s.onGround && !wasShip && r.ticks < cfg.maxJumpTicks) {
+            bool wasFlying = false;
+            while (s.onGround && !wasFlying && r.ticks < cfg.maxJumpTicks) {
                 if (tickOnce(true)) goto done;
-                wasShip = s.ship;
+                wasFlying = gdcore::flying(s);
             }
-            while (!s.onGround && !s.ship && r.ticks < cfg.maxJumpTicks &&
+            while (!s.onGround && !gdcore::flying(s) &&
+                   r.ticks < cfg.maxJumpTicks &&
                    gdcore::pressableRing(s) < 0) {
                 if (tickOnce(false)) goto done;
             }
         } else {
             // Walk / air / ship: fixed granularity; end early on a mode
-            // switch so ship control starts on its own decision boundary.
-            bool startShip = s.ship;
+            // switch so ship / UFO control starts on its own decision
+            // boundary.
+            const int startMode = modeOf(s);
             for (int i = 0; i < cfg.ticksPerAction; ++i) {
                 if (tickOnce(hold)) goto done;
-                if (s.ship != startShip) break;
+                if (modeOf(s) != startMode) break;
             }
         }
     done:

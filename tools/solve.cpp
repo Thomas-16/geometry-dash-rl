@@ -59,7 +59,7 @@ Key keyOf(const gdcore::PlayerState& s) {
               (gdcore::pressableRing(s) >= 0 ? 32u : 0u) |
               (s.ball ? 64u : 0u) | (s.inputHeld ? 128u : 0u) |
               (static_cast<uint32_t>(s.specialDone & 0xffu) << 8) |
-              (s.mini ? (1u << 16) : 0u);
+              (s.mini ? (1u << 16) : 0u) | (s.bird ? (1u << 17) : 0u);
     return k;
 }
 
@@ -126,16 +126,55 @@ int main(int argc, char** argv) {
             std::printf("dead end at tick %d, x=%.2f (%.1f%%) — no surviving "
                         "state\n", tick + 1, cur[0].x + cfg.dx,
                         100.0 * (cur[0].x + cfg.dx) / endX);
+            // the states that all died (y range first, then a sample)
+            float yMin = cur[0].y, yMax = cur[0].y;
+            for (const auto& s : cur) { yMin = std::min(yMin, s.y); yMax = std::max(yMax, s.y); }
+            std::printf("  %zu states, y in [%.2f, %.2f]\n", cur.size(), yMin, yMax);
+            for (size_t i = 0; i < cur.size() && i < 12; ++i) {
+                const auto& s = cur[i];
+                std::printf("  y=%.3f yvel=%.3f %s%s%s og=%d band=%.0f\n", s.y, s.yvel,
+                            s.ship ? "ship" : s.ball ? "ball" : s.bird ? "ufo" : "cube",
+                            s.upsideDown ? " flipped" : "", s.mini ? " mini" : "",
+                            (int)s.onGround, s.bandFloor);
+            }
             return 1;
         }
         if (winTick < 0 && static_cast<int>(next.size()) > kMaxStates) {
-            // deterministic thinning: keep a hash-spread subset
+            // Deterministic thinning, stratified by height: bucket the
+            // states by y (4 units), order each bucket by key hash, then
+            // take one state per bucket per round until the cap is full.
+            // A plain "smallest hashes" cut (the first version) killed
+            // the extreme lineages — e.g. a UFO that never boosts has ONE
+            // continuation per tick, so a 50% random cut ends it within a
+            // few ticks, and Theory of Everything's second UFO section
+            // needs exactly that 90-tick free fall (dead end at x 17260).
             std::vector<size_t> idx(next.size());
             for (size_t i = 0; i < idx.size(); ++i) idx[i] = i;
+            auto bucketOf = [&](size_t i) {
+                return static_cast<int>(std::floor(next[i].y * 0.25f));
+            };
             std::stable_sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
+                const int ba = bucketOf(a), bb = bucketOf(b);
+                if (ba != bb) return ba < bb;
                 return KeyHash{}(keyOf(next[a])) < KeyHash{}(keyOf(next[b]));
             });
-            idx.resize(kMaxStates);
+            // rank within bucket, then order by (rank, bucket): the first
+            // kMaxStates entries are the round-robin pick
+            std::vector<int> rank(idx.size());
+            for (size_t k = 0; k < idx.size(); ++k)
+                rank[k] = (k > 0 && bucketOf(idx[k]) == bucketOf(idx[k - 1]))
+                              ? rank[k - 1] + 1 : 0;
+            std::vector<size_t> order(idx.size());
+            for (size_t k = 0; k < order.size(); ++k) order[k] = k;
+            std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                return rank[a] != rank[b] ? rank[a] < rank[b]
+                                          : bucketOf(idx[a]) < bucketOf(idx[b]);
+            });
+            std::vector<size_t> kept;
+            kept.reserve(kMaxStates);
+            for (size_t k = 0; k < static_cast<size_t>(kMaxStates); ++k)
+                kept.push_back(idx[order[k]]);
+            idx.swap(kept);
             std::sort(idx.begin(), idx.end());
             std::vector<gdcore::PlayerState> n2;
             std::vector<uint16_t> h2;
@@ -144,6 +183,20 @@ int main(int argc, char** argv) {
             h.swap(h2);
         }
         hist.push_back(std::move(h));
+        // GD_SOLVE_DEBUG=<from>:<to>: population size and y range per tick
+        static int dbgFrom = -1, dbgTo = -1;
+        if (dbgFrom < 0) {
+            dbgFrom = dbgTo = 0;
+            if (const char* d = std::getenv("GD_SOLVE_DEBUG"))
+                std::sscanf(d, "%d:%d", &dbgFrom, &dbgTo);
+        }
+        if (tick + 1 >= dbgFrom && tick + 1 <= dbgTo &&
+            (cur.size() != next.size() || (tick + 1) % 50 == 0)) {
+            float yMin = next[0].y, yMax = next[0].y;
+            for (const auto& s : next) { yMin = std::min(yMin, s.y); yMax = std::max(yMax, s.y); }
+            std::printf("  t=%d x=%.1f states %zu -> %zu, y in [%.1f, %.1f]\n", tick + 1,
+                        next[0].x, cur.size(), next.size(), yMin, yMax);
+        }
         cur.swap(next);
         bestX = cur[0].x;
         if ((tick + 1) % 2000 == 0)

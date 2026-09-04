@@ -22,8 +22,8 @@ const char* const kSpeedLabels[] = {"0.25x", "1x", "2x", "4x", "8x", "32x"};
 // Same GD-exact follow as PlayMode::draw, parameterized on the leader.
 void followCamera(const App& app, Camera2D& cam, float& camY, float x, float y,
                   int mode, float dt) {
-    if (mode == 1) {
-        camY += (80.0f - camY) * std::min(1.0f, 6.0f * dt);
+    if (mode == 1 || mode == 3) {
+        camY += (80.0f - camY) * std::min(1.0f, 6.0f * dt); // ship / UFO band 300
     } else if (mode == 2) {
         camY += (50.0f - camY) * std::min(1.0f, 6.0f * dt); // ball band 240
     } else {
@@ -211,7 +211,8 @@ void ReplayMode::draw(const App& app) {
     float lx = lead ? lead->s.x : 0.0f;
     if (follow_)
         followCamera(app, cam_, camY_, lx, lead ? lead->s.y : 105.0f,
-                     lead && lead->s.ship, GetFrameTime());
+                     lead ? (lead->s.ship ? 1 : lead->s.ball ? 2 : lead->s.bird ? 3 : 0) : 0,
+                     GetFrameTime());
     float colorX = follow_ ? lx : cam_.target.x;
 
     drawBackground(app, colorX);
@@ -235,7 +236,8 @@ void ReplayMode::draw(const App& app) {
                            ColorBrightness(g.tint, -0.35f), 150);
             }
         }
-    }, lead && lead->s.ship ? 390.0f : 0.0f);
+    }, lead && (lead->s.ship || lead->s.bird) ? lead->s.bandFloor + 300.0f
+       : lead && lead->s.ball ? lead->s.bandFloor + 240.0f : 0.0f);
 
     if (!error_.empty()) {
         DrawText(error_.c_str(), 12, 10, 20, RED);
@@ -407,7 +409,7 @@ bool TrainingViewMode::poll() {
         snap_.xyv[i * 3 + 1] = rdF32(p + 4);
         snap_.xyv[i * 3 + 2] = rdF32(p + 8);
         uint32_t flags = rdU32(p + 12);
-        snap_.ship[i] = static_cast<uint8_t>(flags & 0xff); // mode: 0 cube, 1 ship, 2 ball
+        snap_.ship[i] = static_cast<uint8_t>(flags & 0xff); // mode: 0 cube, 1 ship, 2 ball, 3 UFO
         snap_.dead[i] = (flags >> 8) & 1;
     }
     snap_.valid = true;
@@ -481,6 +483,7 @@ void TrainingViewMode::draw(const App& app) {
             s.y = snap_.xyv[i * 3 + 1];
             s.ship = snap_.ship[i] == 1;
             s.ball = snap_.ship[i] == 2;
+            s.bird = snap_.ship[i] == 3;
             // The trainer auto-resets on death, so dead=1 snapshots are rare
             // single frames; drawing them red still reads as a death flash
             // when the write rate is high.

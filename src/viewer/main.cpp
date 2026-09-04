@@ -53,6 +53,7 @@ void loadSheets(gdv::App& app) {
     app.atlas.unloadAll();
     app.playerFrame1 = app.playerFrame2 = app.shipFrame1 = app.shipFrame2 = nullptr;
     app.ballFrame1 = app.ballFrame2 = nullptr;
+    app.birdFrame1 = app.birdFrame2 = app.birdFrame3 = nullptr;
     app.textured = app.atlas.loadSheet((resDir / "GJ_GameSheet-uhd.plist").string()) &&
                    app.atlas.loadSheet((resDir / "GJ_GameSheet02-uhd.plist").string());
     if (app.textured) {
@@ -91,6 +92,21 @@ void loadSheets(gdv::App& app) {
             }
         } else {
             TraceLog(LOG_WARNING, "ball icon sheet unavailable — cube sprite in ball sections");
+        }
+        // UFO icon sheet (default UFO, Theory of Everything). Missing sheet
+        // just means the UFO sections render the cube sprite.
+        if (app.atlas.loadSheet((resDir / "icons" / "bird_01-uhd.plist").string())) {
+            app.birdFrame1 = app.atlas.find("bird_01_001.png");
+            app.birdFrame2 = app.atlas.find("bird_01_2_001.png");
+            app.birdFrame3 = app.atlas.find("bird_01_3_001.png");
+            if (app.birdFrame1) {
+                // the hull frame is ~147 px wide: span the 30-unit box
+                float srcPx = std::max(app.birdFrame1->sourceSize.x,
+                                       app.birdFrame1->sourceSize.y);
+                if (srcPx > 0) app.birdScale = 30.0f / (srcPx * gdv::kUnitsPerPx);
+            }
+        } else {
+            TraceLog(LOG_WARNING, "UFO icon sheet unavailable — cube sprite in UFO sections");
         }
     } else {
         TraceLog(LOG_WARNING, "atlases unavailable — falling back to shape rendering");
