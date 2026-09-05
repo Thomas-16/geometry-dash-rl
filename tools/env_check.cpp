@@ -37,7 +37,7 @@ std::string levelPath() {
     return kDefaultLevel;
 }
 
-void printObs(const float* obs) {
+void printObs(const float* obs, bool grid = true) {
     std::printf("y=%.3f yvel=%.3f ground=%.0f ship=%.0f hold=%.0f "
                 "prog=%.4f pdist=%.3f ptype=%.0f\n",
                 obs[0], obs[1], obs[2], obs[3], obs[4], obs[5], obs[6],
@@ -50,6 +50,7 @@ void printObs(const float* obs) {
                 "ringPress=%.0f bufArmed=%.0f\n",
                 obs[17], obs[18], obs[19], obs[20], obs[21], obs[22], obs[23],
                 obs[24], obs[25]);
+    if (!grid) return;
     const float* solid = obs + gdenv::kPlayerDim;
     const float* hazard = solid + gdenv::kGridDim;
     // top row first; player column is col 0
@@ -94,6 +95,84 @@ int main(int argc, char** argv) {
         gdenv::buildObs(s, geom, endX, cfg.dx, obs.data());
         std::printf("player x=%.2f y=%.2f  endX=%.2f\n", s.x, s.y, endX);
         printObs(obs.data());
+        return 0;
+    }
+
+    if (cmd == "obs6") {
+        // Obs v6 at a position (optionally in a mode: cube|ship|ball|ufo):
+        // the appended scalars, the geometry rows and the player-centered
+        // grid.
+        gdcore::PlayerState s;
+        if (argc > 2) s.x = std::strtof(argv[2], nullptr);
+        if (argc > 3) s.y = std::strtof(argv[3], nullptr);
+        if (argc > 4) {
+            std::string m = argv[4];
+            s.ship = m == "ship";
+            s.ball = m == "ball";
+            s.bird = m == "ufo";
+        }
+        std::vector<float> o6(gdenv::kObsDimV6);
+        gdenv::buildObsV6(s, geom, cfg, endX, o6.data());
+        std::printf("player x=%.2f y=%.2f  endX=%.2f  (obs v6, dim %d)\n", s.x,
+                    s.y, endX, gdenv::kObsDimV6);
+        printObs(o6.data(), false);
+        std::printf("floorClr=%.3f ceilClr=%.3f floorOn=%.0f ceilOn=%.0f "
+                    "size=%.2f flipGrace=%.2f land=(%.0f,%.3f,%.3f) overMaxY=%.0f\n",
+                    o6[27], o6[28], o6[29], o6[30], o6[31], o6[32], o6[33],
+                    o6[34], o6[35], o6[36]);
+        static const char* cls[3] = {"haz", "sol", "act"};
+        for (int r = 0; r < gdenv::kGeomRows; ++r) {
+            const float* row = o6.data() + gdenv::kPlayerDimV6 + r * gdenv::kGeomFloats;
+            if (row[0] == 0.0f) continue;
+            std::printf("%s%d l=%.3f b=%.3f r=%.3f t=%.3f c=(%.3f,%.3f) rad=%.3f "
+                        "kind=%.2f state=%.2f\n",
+                        cls[r / gdenv::kGeomPerClass], r % gdenv::kGeomPerClass,
+                        row[1], row[2], row[3], row[4], row[5], row[6], row[7],
+                        row[8], row[9]);
+        }
+        const float* solid = o6.data() + gdenv::kPlayerDimV6 + gdenv::kGeomDim;
+        const float* hazard = solid + gdenv::kGridDim;
+        for (int row = gdenv::kGridRows - 1; row >= 0; --row) {
+            for (int col = 0; col < gdenv::kGridCols; ++col) {
+                float sv = solid[row * gdenv::kGridCols + col];
+                float hv = hazard[row * gdenv::kGridCols + col];
+                char ch = '.';
+                if (hv > 0.5f) ch = 'X';
+                else if (hv > 0.0f) ch = 'x';
+                else if (sv > 0.5f) ch = '#';
+                else if (sv > 0.0f) ch = '+';
+                std::putchar(ch);
+            }
+            std::printf("  dy=[%g,%g)\n", gdenv::kGridYOffV6 + row * gdenv::kCellH,
+                        gdenv::kGridYOffV6 + (row + 1) * gdenv::kCellH);
+        }
+        return 0;
+    }
+
+    if (cmd == "actions") {
+        // Precision-action executor trace: "3,0,5,6,..." action ids from
+        // x=0 (or from --tick-holds prefix), printing each decision's
+        // duration and end state.
+        gdenv::EnvConfig ecfg;
+        ecfg.actionMode = gdenv::kPrecision;
+        gdenv::EnvInstance e;
+        e.reset();
+        const char* p = argc > 2 ? argv[2] : "";
+        while (*p) {
+            char* q;
+            long a = std::strtol(p, &q, 10);
+            uint8_t mask[gdenv::kNumPrecisionActions];
+            gdenv::actionMask(e.s, gdenv::kPrecision, mask);
+            gdenv::StepResult r = e.act(static_cast<int>(a), cfg, geom, ecfg, endX);
+            std::printf("a=%ld%s dur=%d tick=%d x=%.3f y=%.4f yvel=%.3f%s%s%s%s\n",
+                        a, mask[a] ? "" : "(masked)", r.ticks, e.tick, e.s.x,
+                        e.s.y, e.s.yvel, e.s.onGround ? " ground" : "",
+                        e.s.inputHeld ? " held" : "",
+                        gdcore::pressableRing(e.s) >= 0 ? " RING" : "",
+                        e.s.dead ? " DEAD" : r.won ? " WIN" : "");
+            if (r.terminated || r.truncated) break;
+            p = (*q == ',') ? q + 1 : q;
+        }
         return 0;
     }
 

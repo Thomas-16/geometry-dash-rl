@@ -1,6 +1,6 @@
-"""Actor-critic networks for the gdenv observation (18 scalars + 2 occupancy
-grids, see src/env/obs.hpp). obs_dim always comes from the env
-(gdenv_obs_dim), never hard-coded.
+"""Actor-critic networks for the gdenv observation (scalars + optional
+geometry rows + 2 occupancy grids, see src/env/obs.hpp). obs_dim always
+comes from the env (gdenv_obs_dim), never hard-coded.
 
 Two deliberate structural choices, both learned from failed runs:
 
@@ -35,12 +35,25 @@ Two deliberate structural choices, both learned from failed runs:
   so a wrong saturated decision stays trainable: d logit/d raw =
   max(1 - tanh^2, leak). 0 = the plain tanh bound.
 
+Action spaces (env.action_mode): n_actions == 2 keeps the Bernoulli hold
+head above (every level 1-12 checkpoint); n_actions > 2 (precision mode) is
+a categorical head over per-action bounded logits — each logit is
+L*tanh(raw/L) with the same leak, illegal actions (env.action_masks) are
+masked to -inf before the softmax, so a categorical logit gap is capped at
+2L (bound 4 -> the least likely legal action keeps >= e^-8 / n of the mass,
+the same kind of floor the Bernoulli bound gives). The mask is a per-sample
+input everywhere (act / evaluate / logprob) and PPO stores it with the
+sample so the ratios compare the same masked distributions.
+
 Architectures:
 - "cnn" (default): per-trunk conv encoder over the (2, 24, 32) grid — the
   grid is player-anchored, so conv translation equivariance maps directly
   onto "the same obstacle pattern appearing later in the level" — with the
   scalars on a parallel branch (obs.hpp records that diffuse grid signal
-  loses to O(1) scalars in a flat net; keep both paths explicit).
+  loses to O(1) scalar features in a flat net; keep both paths explicit).
+  Obs v6 adds an exact-geometry branch: the 12 nearest-object rows go
+  through a shared per-row encoder and are concatenated (they arrive
+  sorted by distance, so position carries meaning).
 - "mlp": the original flat net, kept as an A/B fallback.
 
 Precision (measured on an RTX 4060 Ti, minibatch 8192): the fp32 NCHW
@@ -66,8 +79,13 @@ import torch.nn.functional as F
 # reshapes to (2, rows, cols) as a pure view).
 GRID_CH, GRID_ROWS, GRID_COLS = 2, 24, 32
 GRID_DIM = GRID_CH * GRID_ROWS * GRID_COLS
+# Obs v6 geometry block (obs.hpp kGeomRows x kGeomFloats), between the
+# scalars and the grid.
+GEOM_ROWS, GEOM_FLOATS = 12, 10
+GEOM_DIM = GEOM_ROWS * GEOM_FLOATS
 
 AMP_MODES = ("bf16", "none")
+MASK_NEG = -1e4  # masked logit (finite: keeps bf16/fp32 softmax NaN-free)
 
 
 def configure_backend() -> None:
@@ -95,6 +113,25 @@ def bernoulli_entropy(logit: torch.Tensor) -> torch.Tensor:
     return p * F.softplus(-logit) + (1.0 - p) * F.softplus(logit)
 
 
+def masked_logits(logits: torch.Tensor, mask) -> torch.Tensor:
+    """logits [N, A] with illegal actions (mask 0) pushed to MASK_NEG."""
+    if mask is None:
+        return logits
+    return torch.where(mask > 0.5, logits, torch.full_like(logits, MASK_NEG))
+
+
+def categorical_logprob(logits: torch.Tensor, action: torch.Tensor,
+                        mask=None) -> torch.Tensor:
+    lp = F.log_softmax(masked_logits(logits, mask), dim=-1)
+    return lp.gather(-1, action.long().unsqueeze(-1)).squeeze(-1)
+
+
+def categorical_entropy(logits: torch.Tensor, mask=None) -> torch.Tensor:
+    lp = F.log_softmax(masked_logits(logits, mask), dim=-1)
+    p = lp.exp()
+    return -(p * lp).sum(-1)
+
+
 def _ortho(layer: nn.Module, gain: float) -> nn.Module:
     nn.init.orthogonal_(layer.weight, gain)
     nn.init.constant_(layer.bias, 0.0)
@@ -109,11 +146,12 @@ def _mlp_trunk(obs_dim: int, h1: int, h2: int) -> nn.Sequential:
 
 
 class _ConvTrunk(nn.Module):
-    """Grid conv branch + scalar branch -> mixed 256-dim feature."""
+    """Grid conv branch + scalar branch [+ geometry branch] -> 256-dim."""
 
-    def __init__(self, scalar_dim: int):
+    def __init__(self, scalar_dim: int, geom: bool = False):
         super().__init__()
         self.scalar_dim = scalar_dim
+        self.geom = geom
         self.conv = nn.Sequential(
             _ortho(nn.Conv2d(GRID_CH, 16, 3, stride=2, padding=1), 2 ** 0.5),
             nn.Tanh(),  # (16, 12, 16)
@@ -127,42 +165,73 @@ class _ConvTrunk(nn.Module):
         self.scalars = nn.Sequential(
             _ortho(nn.Linear(scalar_dim, 64), 2 ** 0.5), nn.Tanh(),
         )
+        mix_in = 192 + 64
+        if geom:
+            # Shared per-row encoder, rows concatenated in distance order.
+            self.geom_row = nn.Sequential(
+                _ortho(nn.Linear(GEOM_FLOATS, 32), 2 ** 0.5), nn.Tanh(),
+            )
+            self.geom_mix = nn.Sequential(
+                _ortho(nn.Linear(GEOM_ROWS * 32, 128), 2 ** 0.5), nn.Tanh(),
+            )
+            mix_in += 128
         self.mix = nn.Sequential(
-            _ortho(nn.Linear(192 + 64, 256), 2 ** 0.5), nn.Tanh(),
+            _ortho(nn.Linear(mix_in, 256), 2 ** 0.5), nn.Tanh(),
         )
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         s = obs[:, :self.scalar_dim]
-        g = obs[:, self.scalar_dim:].view(-1, GRID_CH, GRID_ROWS, GRID_COLS)
+        parts = [self.scalars(s)]
+        off = self.scalar_dim
+        if self.geom:
+            rows = obs[:, off:off + GEOM_DIM].reshape(-1, GEOM_ROWS, GEOM_FLOATS)
+            enc = self.geom_row(rows).reshape(-1, GEOM_ROWS * 32)
+            parts.append(self.geom_mix(enc))
+            off += GEOM_DIM
+        g = obs[:, off:].reshape(-1, GRID_CH, GRID_ROWS, GRID_COLS)
         g = g.contiguous(memory_format=torch.channels_last)
-        return self.mix(torch.cat([self.scalars(s), self.conv(g)], dim=-1))
+        parts.append(self.conv(g))
+        return self.mix(torch.cat(parts, dim=-1))
 
 
 class _ActorCriticBase(nn.Module):
     """Shared heads/act/evaluate over two separate trunk modules."""
 
     def __init__(self, pi_body: nn.Module, vf_body: nn.Module, feat_dim: int,
-                 logit_bound: float, logit_leak: float = 0.0):
+                 logit_bound: float, logit_leak: float = 0.0,
+                 n_actions: int = 2):
         super().__init__()
         self.logit_bound = logit_bound
         self.logit_leak = logit_leak
+        self.n_actions = n_actions
+        self.categorical = n_actions > 2
         self.pi_body = pi_body
         self.vf_body = vf_body
-        self.policy = _ortho(nn.Linear(feat_dim, 1), 0.01)  # hold logit
+        # Bernoulli: one hold logit. Categorical: one bounded logit per
+        # action (state_dict key unchanged, shape differs by n_actions).
+        self.policy = _ortho(nn.Linear(feat_dim, n_actions if self.categorical
+                                       else 1), 0.01)
         self.value = _ortho(nn.Linear(feat_dim, 1), 1.0)
 
-    def forward(self, obs: torch.Tensor, bound=None):
+    def forward(self, obs: torch.Tensor, bound=None, mask=None):
         """bound: per-sample logit bound tensor [N] (or a float); None uses
-        `self.logit_bound` for every row."""
+        `self.logit_bound` for every row. mask: [N, A] legality (categorical
+        only; None = all legal). Returns (logit [N] or [N, A] masked, value
+        [N])."""
         pi_feat = self.pi_body(obs)
         vf_feat = self.vf_body(obs)
         if bound is None:
             bound = self.logit_bound
         # Heads + bound in fp32 regardless of the trunk autocast state.
         with torch.autocast(obs.device.type, enabled=False):
-            raw = self.policy(pi_feat.float()).squeeze(-1)
-            y = torch.tanh(raw / bound)
-            logit = bound * y
+            raw = self.policy(pi_feat.float())
+            if self.categorical:
+                b = bound.unsqueeze(-1) if torch.is_tensor(bound) else bound
+            else:
+                raw = raw.squeeze(-1)
+                b = bound
+            y = torch.tanh(raw / b)
+            logit = b * y
             if self.logit_leak > 0.0:
                 # Leaky bound (see the module docstring): raw - raw.detach()
                 # is exactly 0 in value, so this adds nothing to the logit
@@ -173,50 +242,77 @@ class _ActorCriticBase(nn.Module):
                 slope = (1.0 - y * y).detach()
                 logit = logit + (raw - raw.detach()) * torch.clamp(
                     self.logit_leak - slope, min=0.0)
+            if self.categorical:
+                logit = masked_logits(logit, mask)
             value = self.value(vf_feat.float()).squeeze(-1)
         return logit, value
 
+    def logprob_entropy(self, logit: torch.Tensor, actions: torch.Tensor):
+        """(logprob [N], entropy [N]) of `actions` under a forward's
+        (already masked) logit."""
+        if self.categorical:
+            return categorical_logprob(logit, actions), categorical_entropy(logit)
+        return bernoulli_logprob(logit, actions), bernoulli_entropy(logit)
+
+    def greedy(self, logit: torch.Tensor) -> torch.Tensor:
+        """Deterministic action(s) for a forward's logit, as float ids."""
+        if self.categorical:
+            return logit.argmax(-1).float()
+        return (logit > 0).float()
+
     @torch.no_grad()
     def act(self, obs: torch.Tensor, deterministic: bool = False,
-            bound=None):
+            bound=None, mask=None):
         """Returns one stacked [3, N] fp32 tensor: action, logprob, value —
         one tensor so the rollout does a single device->host copy per step."""
-        logit, value = self(obs, bound)
+        logit, value = self(obs, bound, mask)
         if deterministic:
-            action = (logit > 0).float()
-            logprob = torch.zeros_like(logit)
+            action = self.greedy(logit)
+            logprob = torch.zeros_like(value)
+        elif self.categorical:
+            # Gumbel-max sampling: graph-safe (no multinomial sync) and
+            # exact for the masked softmax.
+            u = torch.rand_like(logit).clamp_(1e-10, 1.0)
+            action = (logit - torch.log(-torch.log(u))).argmax(-1)
+            logprob = categorical_logprob(logit, action)
+            action = action.float()
         else:
             action = (torch.rand_like(logit) < torch.sigmoid(logit)).float()
             logprob = bernoulli_logprob(logit, action)
         return torch.stack([action, logprob, value])
 
-    def evaluate(self, obs: torch.Tensor, actions: torch.Tensor, bound=None):
-        logit, value = self(obs, bound)
-        return bernoulli_logprob(logit, actions), bernoulli_entropy(logit), value
+    def evaluate(self, obs: torch.Tensor, actions: torch.Tensor, bound=None,
+                 mask=None):
+        logit, value = self(obs, bound, mask)
+        logprob, entropy = self.logprob_entropy(logit, actions)
+        return logprob, entropy, value
 
 
 class ActorCritic(_ActorCriticBase):
     """Original flat-MLP architecture ("mlp")."""
 
     def __init__(self, obs_dim: int, hidden: tuple[int, int] = (512, 256),
-                 logit_bound: float = 4.0, logit_leak: float = 0.0):
+                 logit_bound: float = 4.0, logit_leak: float = 0.0,
+                 n_actions: int = 2):
         h1, h2 = hidden
         super().__init__(_mlp_trunk(obs_dim, h1, h2),
                          _mlp_trunk(obs_dim, h1, h2), h2, logit_bound,
-                         logit_leak)
+                         logit_leak, n_actions)
 
 
 class ConvActorCritic(_ActorCriticBase):
-    """Grid-CNN architecture ("cnn")."""
+    """Grid-CNN architecture ("cnn"), with the geometry branch for obs v6."""
 
     def __init__(self, obs_dim: int, logit_bound: float = 4.0,
-                 logit_leak: float = 0.0):
-        scalar_dim = obs_dim - GRID_DIM
+                 logit_leak: float = 0.0, n_actions: int = 2,
+                 obs_version: int = 5):
+        geom = obs_version >= 6
+        scalar_dim = obs_dim - GRID_DIM - (GEOM_DIM if geom else 0)
         if scalar_dim <= 0:
             raise ValueError(f"obs_dim {obs_dim} too small for grid "
                              f"{GRID_DIM} — obs.hpp/model.py mismatch")
-        super().__init__(_ConvTrunk(scalar_dim), _ConvTrunk(scalar_dim), 256,
-                         logit_bound, logit_leak)
+        super().__init__(_ConvTrunk(scalar_dim, geom), _ConvTrunk(scalar_dim, geom),
+                         256, logit_bound, logit_leak, n_actions)
         # channels_last conv weights: keys/shapes unchanged, so checkpoints
         # from the NCHW era load as-is.
         self.to(memory_format=torch.channels_last)
@@ -233,10 +329,17 @@ def load_model_state(model: _ActorCriticBase, state: dict,
     exactly on any state where the new features were absent. Grid columns
     keep their positions because the grid follows the scalar block: the
     checkpoint's (rows, cols) are re-laid out over the new scalar_dim.
-    Returns a list of human-readable notes about what was widened."""
+    Returns a list of human-readable notes about what was widened. A
+    different action head shape (Bernoulli vs categorical) is a contract
+    mismatch and raises."""
     notes: list[str] = []
     own = model.state_dict()
     fixed = dict(state)
+    for key in ("policy.weight", "policy.bias"):
+        if key in fixed and fixed[key].shape != own[key].shape:
+            raise ValueError(
+                f"checkpoint action head {tuple(fixed[key].shape)} != model "
+                f"{tuple(own[key].shape)}: action-space contract mismatch")
     for key, w in own.items():
         old = fixed.get(key)
         if old is None or old.shape == w.shape or old.dim() != 2 or w.dim() != 2:
@@ -262,14 +365,16 @@ def load_model_state(model: _ActorCriticBase, state: dict,
 
 
 def make_model(obs_dim: int, arch: str = "cnn", logit_bound: float = 4.0,
-               logit_leak: float = 0.0) -> _ActorCriticBase:
+               logit_leak: float = 0.0, n_actions: int = 2,
+               obs_version: int = 5) -> _ActorCriticBase:
     """logit_leak matters only for training (backward); inference-only
     callers (eval, deploy, the rollout snapshot) can leave it at 0."""
     if arch == "cnn":
-        return ConvActorCritic(obs_dim, logit_bound, logit_leak)
+        return ConvActorCritic(obs_dim, logit_bound, logit_leak, n_actions,
+                               obs_version)
     if arch == "mlp":
         return ActorCritic(obs_dim, logit_bound=logit_bound,
-                           logit_leak=logit_leak)
+                           logit_leak=logit_leak, n_actions=n_actions)
     raise ValueError(f"unknown arch {arch!r} (expected 'cnn' or 'mlp')")
 
 
@@ -277,8 +382,8 @@ class GraphedAct:
     """CUDA-graph replay of `model.act` for a fixed batch: the rollout's
     per-step forward is ~30 small kernels whose launch overhead exceeds
     their GPU time. Call with the rollout batch already copied into
-    `self.obs` (the graph's static input) and the per-row logit bound in
-    `self.bound` (static too; initialised to the model's bound); returns
+    `self.obs` (the graph's static input), the per-row logit bound in
+    `self.bound` and the action mask in `self.mask` (static too); returns
     the static [3, N] output (read it before the next call). RNG inside
     the capture is graph-safe (fresh samples per replay). Falls back to
     eager if capture fails."""
@@ -290,13 +395,16 @@ class GraphedAct:
         self.device = device
         self.obs = torch.zeros(n, obs_dim, device=device)
         self.bound = torch.full((n,), float(model.logit_bound), device=device)
+        self.mask = torch.ones(n, model.n_actions, device=device)
         self.out: torch.Tensor | None = None
         self.graph: torch.cuda.CUDAGraph | None = None
         self.enabled = device.type == "cuda"
 
     def _eager(self) -> torch.Tensor:
         with autocast_ctx(self.device, self.amp):
-            return self.model.act(self.obs, bound=self.bound)
+            return self.model.act(self.obs, bound=self.bound,
+                                  mask=self.mask if self.model.categorical
+                                  else None)
 
     def _capture(self) -> None:
         s = torch.cuda.Stream()

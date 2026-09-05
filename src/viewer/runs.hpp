@@ -66,6 +66,10 @@ struct RunInfo {
     std::string levelPath;  // "" = default (Stereo Madness)
     int nEnvs = 0, updates = 0;
     std::string arch, amp;
+    // contracts (config.json obs_version / action_mode; legacy configs
+    // without them are obs 5 / macro)
+    int obsVersion = 5;
+    std::string actionMode = "macro";
     float endX = -1.0f;     // effective end (config end_x; full level => natural end)
     float endXArg = -1.0f;  // requested --end-x (-1 = full level); legacy configs infer it
     // files

@@ -2,11 +2,13 @@
 
 Any single winning episode is a full certificate (the sim is deterministic):
 its per-tick holds replay identically in the sim, and — if the replica is
-exact — in the real game via the future Geode open-loop mod.
+exact — in the real game via the Geode open-loop mod.
 
   python -m gdrl.eval runs/full/ckpt_latest.pt --episodes 64
 
-Writes runs/<name>/solution.json (first/best win) and eval.gdtrace.
+The env is built from the CHECKPOINT'S contracts (obs layout, action
+space, level); a mismatch with the running DLL is refused. Writes
+runs/<name>/solution.json (first/best win) and eval.gdtrace.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .env import GdVecEnv
+from .env import GdVecEnv, OBS_VERSION
 from .model import (AMP_MODES, autocast_ctx, configure_backend, load_model_state,
                     make_model)
 from . import traces
@@ -42,6 +44,19 @@ def level_id_of(level_path: str | None) -> int:
         return 1
     stem = Path(level_path).stem
     return int(stem) if stem.isdigit() else -1
+
+
+def env_kwargs_from_ckpt(ckpt: dict) -> dict:
+    """obs_version / action_mode / reward_gamma the checkpoint trained under
+    (legacy checkpoints: obs 5, macro, flat reward)."""
+    c = ckpt.get("contracts") or {}
+    cfgd = ckpt.get("config", {})
+    obs_version = int(c.get("obs_version", cfgd.get("obs_version", OBS_VERSION)))
+    action_mode = c.get("action_mode", cfgd.get("action_mode", "macro"))
+    reward_gamma = float(c.get("reward_gamma",
+                               cfgd.get("gamma", 0.0) if action_mode == "precision" else 0.0))
+    return dict(obs_version=obs_version, action_mode=action_mode,
+                reward_gamma=reward_gamma)
 
 
 def main():
@@ -80,10 +95,31 @@ def main():
               f"training 'det WIN's do not carry over")
 
     n = args.episodes + 1  # env 0 acts deterministically
-    env = GdVecEnv(args.level, n, args.ticks_per_action, args.end_x)
+    env_kw = env_kwargs_from_ckpt(ckpt)
+    env = GdVecEnv(args.level, n, args.ticks_per_action, args.end_x, **env_kw)
+    want = ckpt.get("contracts")
+    if want is None:
+        # Pre-contract checkpoint: the only recorded identity is the level
+        # path; refuse a different level file.
+        trained = ckpt.get("config", {}).get("level")
+        if trained and args.level and Path(trained).name != Path(args.level).name:
+            raise SystemExit(f"eval refused: legacy checkpoint trained on "
+                             f"{trained}, not {args.level}")
+    else:
+        have = env.contracts()
+        bad = [k for k in ("obs_version", "action_mode", "n_actions",
+                           "level_fingerprint", "sim_fingerprint")
+               if k in want and want[k] != have[k]]
+        if bad:
+            raise SystemExit(f"eval refused: checkpoint contracts differ from "
+                             f"this DLL / level: {bad} "
+                             f"({[(k, want[k], have[k]) for k in bad]})")
+    print(f"contracts: obs v{env.obs_version}, {env.action_mode} actions "
+          f"({env.n_actions}), level {env.contracts()['level_fingerprint']}")
     arch = ckpt.get("config", {}).get("arch", "mlp")
-    model = make_model(env.obs_dim, arch,
-                       ckpt.get("logit_bound", 4.0)).to(device)
+    model = make_model(env.obs_dim, arch, ckpt.get("logit_bound", 4.0),
+                       n_actions=env.n_actions,
+                       obs_version=env.obs_version).to(device)
     for note in load_model_state(model, ckpt["model"]):
         print(f"checkpoint obs migration: {note}")
     model.eval()
@@ -94,31 +130,43 @@ def main():
     # from-x=0 holds (certificate prefix + the policy's own suffix).
     prefix = np.zeros(0, np.uint8)
     cfgd = ckpt.get("config", {})
-    anchor = np.asarray(ckpt.get("anchor_holds", []), np.uint8)
-    x0 = float(ckpt.get("anchor_x", 0.0)) - float(cfgd.get("stitch_back",
-                                                          600.0))
+    cert = ckpt.get("certificate")
+    anchor = np.asarray(cert["holds"] if cert else ckpt.get("anchor_holds", []),
+                        np.uint8)
+    anchor_x = float(cert["x"] if cert else ckpt.get("anchor_x", 0.0))
+    x0 = anchor_x - float(ckpt.get("stitch_back_now",
+                                   cfgd.get("stitch_back", 600.0)))
+    stitched = False
     if cfgd.get("stitch", 0) and len(anchor) and x0 > 0 \
             and not args.from_start:
-        blob = env.trace_states(anchor, [x0])[0]
-        if blob is not None:
-            # Prefix length from a replay (same first-boundary rule as
-            # trace_states), not the blob's byte layout.
-            robs, _, _, rticks, rn, _, _ = env.replay([anchor], None)
-            hit = np.nonzero(robs[0, :rn[0], 5] * env.end_x >= x0)[0]
-            tick = int(rticks[0, :hit[0]].sum())
-            prefix = anchor[:tick]
-            for i in range(n):
-                env.set_state(i, blob)
-            print(f"stitched: starting from the certificate frontier "
-                  f"x {x0:.0f} (prefix {tick} ticks, certificate to "
-                  f"{ckpt.get('anchor_x', 0.0):.0f})")
+        x_raw, won_raw, _ = env.run_holds(anchor)
+        if x_raw < x0:
+            print(f"WARNING: certificate does not raw-replay to its frontier "
+                  f"(raw {x_raw:.0f} < {x0:.0f}); running from x=0")
+        else:
+            blob = env.trace_states(anchor, [x0])[0]
+            if blob is not None:
+                # Prefix length from a replay (same first-boundary rule as
+                # trace_states), not the blob's byte layout.
+                robs, _, _, rticks, rn, _, _ = env.replay([anchor], None)
+                hit = np.nonzero(robs[0, :rn[0], 5] * env.end_x >= x0)[0]
+                tick = int(rticks[0, :hit[0]].sum())
+                prefix = anchor[:tick]
+                for i in range(n):
+                    env.set_state(i, blob)
+                stitched = True
+                print(f"stitched: starting from the certificate frontier "
+                      f"x {x0:.0f} (prefix {tick} ticks, certificate to "
+                      f"{anchor_x:.0f})")
     obs = torch.as_tensor(env._obs.copy(), device=device)
     episodes: list[traces.Episode | None] = [None] * n
     while any(e is None for e in episodes):
+        mask = (torch.as_tensor(env.action_masks().astype(np.float32),
+                                device=device) if model.categorical else None)
         with torch.no_grad(), autocast_ctx(device, amp):
-            logit, _ = model(obs)
-        act = (torch.rand_like(logit) < torch.sigmoid(logit))
-        act[0] = logit[0] > 0
+            act = model.act(obs, mask=mask)[0]
+            det_act = model.greedy(model(obs, mask=mask)[0])
+        act[0] = det_act[0]
         actions_np = act.to(torch.uint8).cpu().numpy()
         next_obs, _, term, trunc, info = env.step(actions_np)
         done = (term | trunc).astype(bool)
@@ -146,12 +194,19 @@ def main():
 
     if wins:
         best = det_ep if det_ep.won else wins[0]
+        # Raw replay verification (deployment semantics) before writing.
+        x_raw, won_raw, _ = env.run_holds(best.holds)
+        if not won_raw:
+            raise SystemExit(f"winning episode does not raw-replay to a WIN "
+                             f"(raw x {x_raw:.0f}) — not writing a solution")
         sol = {
             "tps": traces.TPS,
             "level_id": level_id_of(args.level),
             "level_end_x": float(env.end_x),
             "n_ticks": int(len(best.holds)),
             "deterministic_policy": bool(det_ep.won),
+            "stitched": stitched,
+            "contracts": env.contracts(),
             "holds": holds_to_ranges(best.holds),
         }
         (run_dir / "solution.json").write_text(json.dumps(sol, indent=2))

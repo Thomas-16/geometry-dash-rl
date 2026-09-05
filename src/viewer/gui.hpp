@@ -55,6 +55,10 @@ private:
         int amp = 0;          // 0 bf16, 1 none
         bool compile = false;
         char resume[512] = "";
+        // contracts (train.py --obs-version / --action-mode / --teacher-coef)
+        int obsVersion = 1;   // 0 -> 5 (legacy), 1 -> 6 (default)
+        int actionMode = 1;   // 0 macro, 1 precision (default)
+        float teacherCoef = 0.25f;
         // advanced
         int ticksPerAction = 4;
         int rollout = 64;
@@ -76,6 +80,9 @@ private:
               entropy = 0;
         float detX = -1;
         bool detWin = false;
+        // teacher-loss diagnostics (precision / planner demos): mean
+        // probability of the demo action, disagreement rate; -1 = none
+        float teacherP = -1, teacherDis = -1;
         std::string phase;  // explore / polish / collapse / stopped / done
     };
     struct Pipeline {

@@ -23,6 +23,12 @@ class PPOConfig:
     # gamma^ticks per step. 0.9995 = ~8.3 s reward horizon.
     gamma: float = 0.9995
     gae_lambda: float = 0.95
+    # Duration-aware GAE (precision action mode): the per-step lambda is
+    # gae_lambda^(ticks/4), so a 1-tick decision carries 4x less trace
+    # decay than a 4-tick one and a 100-tick hop macro correspondingly
+    # more — the trace horizon is measured in sim time, like the discount.
+    # Off (False) in the macro mode every level 1-12 run trained under.
+    duration_lambda: bool = False
     clip: float = 0.2
     vf_clip: float = 0.2
     vf_coef: float = 0.5
@@ -49,9 +55,10 @@ class RolloutBuffer:
     so GAE is a cheap numpy scan and the update uploads its inputs once."""
 
     def __init__(self, steps: int, n_envs: int, obs_dim: int,
-                 device: torch.device):
+                 device: torch.device, n_actions: int = 2):
         self.steps, self.n_envs = steps, n_envs
         self.device = device
+        self.n_actions = n_actions
         s = (steps, n_envs)
         self.obs = torch.zeros(*s, obs_dim, device=device)
         self.actions = np.zeros(s, np.float32)
@@ -60,6 +67,8 @@ class RolloutBuffer:
         self.values = np.zeros(s, np.float32)
         # per-step discount gamma^ticks (variable-duration SMDP steps)
         self.discounts = np.zeros(s, np.float32)
+        # per-step duration in ticks (duration-aware GAE lambda)
+        self.durations = np.full(s, 4.0, np.float32)
         # done = terminated (bootstrap 0); trunc_value = V(final_obs) where
         # truncated, folded into the reward before GAE.
         self.terminated = np.zeros(s, np.float32)
@@ -72,15 +81,21 @@ class RolloutBuffer:
         # an unweighted bonus slowly erodes confidence there until deaths
         # reappear; the trainer scales it down outside the explore zone.
         self.ent_w = np.ones(s, np.float32)
+        # Per-sample action mask the action was sampled under (categorical
+        # policies; all ones for the Bernoulli head).
+        self.masks = np.ones((*s, n_actions), np.float32)
         self.t = 0
 
     def add(self, alv: np.ndarray, rewards: np.ndarray, discounts: np.ndarray,
             terminated: np.ndarray, bounds: np.ndarray | None = None,
-            ent_w: np.ndarray | None = None):
+            ent_w: np.ndarray | None = None, masks: np.ndarray | None = None,
+            durations: np.ndarray | None = None):
         """alv: [3, n_envs] = action, logprob, value (model.act output).
         The obs row for this step was already copied into self.obs[t].
         bounds: per-env logit bound used for this step (None keeps the
-        buffer's default 4); ent_w: per-env entropy weight (None = 1)."""
+        buffer's default 4); ent_w: per-env entropy weight (None = 1);
+        masks: [n_envs, n_actions] legality the action was sampled under
+        (None = all legal); durations: ticks per step (None = 4)."""
         i = self.t
         self.actions[i] = alv[0]
         self.logprobs[i] = alv[1]
@@ -92,9 +107,14 @@ class RolloutBuffer:
             self.bounds[i] = bounds
         if ent_w is not None:
             self.ent_w[i] = ent_w
+        if masks is not None:
+            self.masks[i] = masks
+        if durations is not None:
+            self.durations[i] = durations
         self.t += 1
 
-    def compute_advantages(self, last_value: np.ndarray, lam: float):
+    def compute_advantages(self, last_value: np.ndarray, lam: float,
+                           duration_lambda: bool = False):
         adv = np.zeros_like(self.rewards)
         gae = np.zeros(self.n_envs, np.float32)
         for t in reversed(range(self.steps)):
@@ -105,9 +125,10 @@ class RolloutBuffer:
             # must stop. Truncation's V(final_obs) was already folded into
             # rewards[t] by the trainer, so nonterminal covers both here.
             g = self.discounts[t]
+            lam_t = (lam ** (self.durations[t] / 4.0)) if duration_lambda else lam
             delta = (self.rewards[t] + g * next_value * nonterminal
                      - self.values[t])
-            gae = delta + g * lam * nonterminal * gae
+            gae = delta + g * lam_t * nonterminal * gae
             adv[t] = gae
         returns = adv + self.values
         return adv, returns
@@ -129,35 +150,43 @@ class PPO:
 
     def update(self, buf: RolloutBuffer, last_obs: torch.Tensor,
                progress: float, lr_override: float | None = None,
-               ent_override: float | None = None) -> dict:
+               ent_override: float | None = None,
+               last_mask: torch.Tensor | None = None,
+               lr_floor: float = 0.0) -> dict:
         """progress in [0,1] drives lr/entropy annealing; the overrides
-        replace the annealed values for this call (polish phase)."""
+        replace the annealed values for this call (polish phase); lr_floor
+        clamps the annealed lr from below (precision mode keeps 1e-4 until
+        the first completion)."""
         cfg = self.cfg
         dev = self.device
         lr = cfg.lr + (cfg.lr_final - cfg.lr) * progress
         ent_coef = cfg.ent_coef + (cfg.ent_coef_final - cfg.ent_coef) * progress
         if lr_override is not None:
             lr = lr_override
+        lr = max(lr, lr_floor)
         if ent_override is not None:
             ent_coef = ent_override
         for g in self.optimizer.param_groups:
             g["lr"] = lr
 
         with torch.no_grad(), autocast_ctx(dev, cfg.amp):
-            last_value = self.model(last_obs)[1].float().cpu().numpy()
-        adv, returns = buf.compute_advantages(last_value, cfg.gae_lambda)
+            last_value = self.model(last_obs, mask=last_mask)[1].float().cpu().numpy()
+        adv, returns = buf.compute_advantages(last_value, cfg.gae_lambda,
+                                              cfg.duration_lambda)
 
         b_obs = buf.obs.reshape(-1, buf.obs.shape[-1])
         n = b_obs.shape[0]
         # One upload of every host-side field, then everything stays on the
         # device: [7, n] = actions, old logprobs, old values, adv, returns,
-        # logit bounds, entropy weights.
+        # logit bounds, entropy weights (+ the masks for categorical heads).
         host = np.stack([buf.actions.reshape(-1), buf.logprobs.reshape(-1),
                          buf.values.reshape(-1), adv.reshape(-1),
                          returns.reshape(-1), buf.bounds.reshape(-1),
                          buf.ent_w.reshape(-1)])
         (b_actions, b_logprobs, b_values, b_adv, b_returns,
          b_bounds, b_ent_w) = torch.as_tensor(host, device=dev).unbind(0)
+        b_masks = (torch.as_tensor(buf.masks.reshape(n, -1), device=dev)
+                   if self.model.categorical else None)
 
         mb_size = n // cfg.minibatches
         if self._mb_obs is None or self._mb_obs.shape[0] != mb_size:
@@ -177,7 +206,8 @@ class PPO:
                 torch.index_select(b_obs, 0, m, out=mb_obs)
                 with autocast_ctx(dev, cfg.amp):
                     logprob, entropy, value = self.model.evaluate(
-                        mb_obs, b_actions[m], b_bounds[m])
+                        mb_obs, b_actions[m], b_bounds[m],
+                        b_masks[m] if b_masks is not None else None)
                 ratio = (logprob - b_logprobs[m]).exp()
                 madv = b_adv[m]
                 # std floor 1e-2: when the policy plateaus at one obstacle,

@@ -22,6 +22,8 @@ namespace {
 
 const char* const kArchNames[] = {"cnn", "mlp"};
 const char* const kAmpNames[] = {"bf16", "none"};
+const char* const kObsVersionNames[] = {"5", "6"};
+const char* const kActionModeNames[] = {"macro", "precision"};
 
 std::string fmtSecs(double s) {
     int t = (int)s;
@@ -194,6 +196,9 @@ std::vector<std::string> Gui::buildTrainArgs(const App& app) const {
     if (f.amp != d.amp) { a.push_back("--amp"); a.push_back(kAmpNames[f.amp]); }
     if (f.compile) a.push_back("--compile");
     if (f.resume[0]) { a.push_back("--resume"); a.push_back(f.resume); }
+    if (f.obsVersion != d.obsVersion) { a.push_back("--obs-version"); a.push_back(kObsVersionNames[f.obsVersion]); }
+    if (f.actionMode != d.actionMode) { a.push_back("--action-mode"); a.push_back(kActionModeNames[f.actionMode]); }
+    addF("--teacher-coef", f.teacherCoef, d.teacherCoef);
     addI("--ticks-per-action", f.ticksPerAction, d.ticksPerAction);
     addI("--rollout", f.rollout, d.rollout);
     addF("--gamma", f.gamma, d.gamma);
@@ -300,6 +305,10 @@ void Gui::prefillResume(const RunInfo& r) {
     form_.endX = -1.0f;
     form_.arch = r.arch == "mlp" ? 1 : 0;
     form_.amp = r.amp == "none" ? 1 : 0;
+    // A resume must carry the checkpoint's contracts (train.py refuses a
+    // mismatch): legacy runs are obs 5 / macro, not the form defaults.
+    form_.obsVersion = r.obsVersion == 6 ? 1 : 0;
+    form_.actionMode = r.actionMode == "precision" ? 1 : 0;
     tab_ = 1;
     wantTab_ = true;
     if (r.endXArg > 0) {
@@ -318,6 +327,7 @@ void Gui::pollPipelines() {
     static const std::regex kUpd(
         R"(^upd\s+(\d+) \| x\s+([-\d.]+) avg\s+([-\d.]+) max \(best\s+([-\d.]+),\s+([-\d.]+)%\) \| win ([\d.]+)% \| ([\d.]+)M ticks/s \| ([\d.]+)k dec/s \| ent ([\d.]+))");
     static const std::regex kDet(R"(\| det\s+([-\d.]+)( WIN)?)");
+    static const std::regex kTeach(R"(\| teach p([\d.]+) d([\d.]+))");
     std::vector<std::string> fresh;
     for (auto& [id, p] : pipelines_) {
         size_t n = jobs_.lineCount(id);
@@ -337,6 +347,11 @@ void Gui::pollPipelines() {
                 p.status.sps = std::strtof(m[7].str().c_str(), nullptr);
                 p.status.decS = std::strtof(m[8].str().c_str(), nullptr);
                 p.status.entropy = std::strtof(m[9].str().c_str(), nullptr);
+                std::smatch tm;
+                if (std::regex_search(line, tm, kTeach)) {
+                    p.status.teacherP = std::strtof(tm[1].str().c_str(), nullptr);
+                    p.status.teacherDis = std::strtof(tm[2].str().c_str(), nullptr);
+                }
                 std::smatch d;
                 if (std::regex_search(line, d, kDet)) {
                     p.status.detX = std::strtof(d[1].str().c_str(), nullptr);
@@ -623,6 +638,11 @@ void Gui::drawTrainTab(App& app) {
     ImGui::SetNextItemWidth(120); ImGui::InputInt("det-every", &form_.detEvery, 1, 10);
     ImGui::SameLine(); ImGui::SetNextItemWidth(100); ImGui::InputFloat("sil-coef", &form_.silCoef, 0, 0, "%g");
     ImGui::Checkbox("--compile (needs triton-windows)", &form_.compile);
+    ImGui::SetNextItemWidth(120); ImGui::Combo("obs-version", &form_.obsVersion, kObsVersionNames, 2);
+    helpMarker("5 = legacy absolute-band grid (every level 1-12 checkpoint); 6 = player-centered grid + exact geometry rows.\n"
+               "A resume must match its checkpoint's contracts.");
+    ImGui::SameLine(); ImGui::SetNextItemWidth(110); ImGui::Combo("action-mode", &form_.actionMode, kActionModeNames, 2);
+    helpMarker("macro = 2 actions (walk / hop, 4-tick windows); precision = 7 actions (release / hold for 1, 2, 4 ticks + hop).");
     ImGui::SetNextItemWidth(-110);
     ImGui::InputText("resume from", form_.resume, sizeof form_.resume);
     helpMarker("checkpoint .pt path; arch comes from the checkpoint. Use 'Resume' in the Runs tab to prefill.");
@@ -639,6 +659,8 @@ void Gui::drawTrainTab(App& app) {
         ImGui::SameLine();
         ImGui::Checkbox("--no-graph", &form_.noGraph);
         ImGui::SetNextItemWidth(100); ImGui::InputInt("sil-episodes", &form_.silEpisodes);
+        ImGui::SetNextItemWidth(100); ImGui::InputFloat("teacher-coef", &form_.teacherCoef, 0, 0, "%g");
+        helpMarker("supervised loss on verified planner demos (0 = off).");
         ImGui::SetNextItemWidth(100); ImGui::InputText("device", form_.device, sizeof form_.device);
         ImGui::SetNextItemWidth(-80); ImGui::InputText("extra flags", form_.extra, sizeof form_.extra);
         if (ImGui::Button("Reset form to defaults")) {
@@ -700,6 +722,8 @@ void Gui::drawTrainTab(App& app) {
             if (s.detX >= 0)
                 ImGui::TextColored(s.detWin ? ImVec4(0.5f, 1, 0.5f, 1) : ImVec4(1, 1, 1, 1),
                                    "det x %.0f%s", s.detX, s.detWin ? "  WIN" : "");
+            if (s.teacherP >= 0)
+                ImGui::Text("teacher: p(demo action) %.2f   disagreement %.2f", s.teacherP, s.teacherDis);
         } else {
             ImGui::TextDisabled("starting up (DLL load, env creation, explore scout)...");
         }

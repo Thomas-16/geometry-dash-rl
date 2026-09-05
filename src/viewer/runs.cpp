@@ -405,6 +405,8 @@ std::vector<RunInfo> scanRuns() {
                 r.updates = j.value("updates", 0);
                 r.arch = j.value("arch", std::string("mlp"));
                 r.amp = j.value("amp", std::string(""));
+                r.obsVersion = j.value("obs_version", 5);
+                r.actionMode = j.value("action_mode", std::string("macro"));
                 if (j.contains("end_x") && j["end_x"].is_number()) r.endX = j["end_x"].get<float>();
                 if (j.contains("end_x_arg") && j["end_x_arg"].is_number()) {
                     r.endXArg = j["end_x_arg"].get<float>();

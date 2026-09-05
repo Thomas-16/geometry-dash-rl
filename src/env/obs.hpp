@@ -2,6 +2,7 @@
 
 #include "core/geometry.hpp"
 #include "core/physics.hpp"
+#include "env/contracts.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -53,45 +54,80 @@ constexpr int kGridDim = kGridRows * kGridCols;  // per channel
 // frozen — additions bump kObsVersion and only ever append.
 // gdenv_obs_version() exposes this so the Python side can refuse a stale
 // DLL.
-constexpr int kObsVersion = 5;
+constexpr int kObsVersion = kObsVersionLegacy; // 5: the frozen layout below
 constexpr int kPlayerDim = 27;
 constexpr int kObsDim = kPlayerDim + 2 * kGridDim;
 
+// Obs v6 (2026-09-05, docs/rl-improvement-plan.md). Same 24x32 grid of
+// 15x15 cells and the same two channels, but the window MOVES WITH THE
+// PLAYER: x offsets [-30, 450), y offsets [-180, 180). Theory of
+// Everything's UFO corridor sits at y 1011-1155 and every one of its 311
+// decisions saw an empty v5 grid (absolute band [90, 450)). Scalars 0-26
+// keep their v5 meaning; 27-36 are appended (floor / ceiling clearance,
+// which boundary lines apply, collision size, gravity-flip grace, landing
+// snap memory, the max-y warning flag). Then an exact geometry block: the
+// four nearest hazards, four nearest solids and four nearest interactive
+// objects (pads / rings / gravity, size and mode portals) inside the
+// window, each as [mask, left, bottom, right, top, cx, cy, radius, kind,
+// state] relative to the player, ordered by distance to the player's box
+// (ties by object order), zero rows masked. Layout:
+//   [0, kPlayerDimV6)              scalars
+//   [kPlayerDimV6, +kGeomDim)      geometry rows
+//   [.., +2*kGridDim)              solid grid, hazard grid ([row][col])
+constexpr float kGridXOffV6 = -30.0f;
+constexpr float kGridYOffV6 = -180.0f;
+constexpr int kPlayerDimV6 = 37;
+constexpr int kGeomPerClass = 4;
+constexpr int kGeomRows = 3 * kGeomPerClass; // hazards, solids, interactives
+constexpr int kGeomFloats = 10;
+constexpr int kGeomDim = kGeomRows * kGeomFloats; // 120
+constexpr int kObsDimV6 = kPlayerDimV6 + kGeomDim + 2 * kGridDim; // 1693
+
+inline int obsDimFor(int version) {
+    return version == kObsVersionV6 ? kObsDimV6 : kObsDim;
+}
+
 namespace detail {
 
-// Accumulate one sorted-by-left box list into a [row][col] cell block.
-inline void rasterize(const std::vector<gdcore::Box>& boxes, float px,
-                      float* cells) {
+// Accumulate one sorted-by-left box list into a [row][col] cell block whose
+// origin (bottom-left) is (ox, oy).
+inline void rasterizeAt(const std::vector<gdcore::Box>& boxes, float ox,
+                        float oy, float* cells) {
     // Boxes are at most 66 wide (the sawblade 88 bounding square; every
     // rectangle is <= 34), same slack as gdcore::detail::kHazardMaxW.
     auto it = std::lower_bound(
-        boxes.begin(), boxes.end(), px - 66.0f,
+        boxes.begin(), boxes.end(), ox - 66.0f,
         [](const gdcore::Box& b, float v) { return b.left < v; });
-    const float gx1 = px + kLookahead;
-    const float gy1 = kGridYBase + kGridRows * kCellH;
+    const float gx1 = ox + kLookahead;
+    const float gy1 = oy + kGridRows * kCellH;
     for (; it != boxes.end() && it->left < gx1; ++it) {
-        float l = std::max(it->left, px);
+        float l = std::max(it->left, ox);
         float r = std::min(it->right, gx1);
-        float b = std::max(it->bottom, kGridYBase);
+        float b = std::max(it->bottom, oy);
         float t = std::min(it->top, gy1);
         if (l >= r || b >= t) continue;
-        int c0 = static_cast<int>((l - px) / kCellW);
+        int c0 = static_cast<int>((l - ox) / kCellW);
         int c1 = std::min(kGridCols,
-                          static_cast<int>(std::ceil((r - px) / kCellW)));
-        int r0 = static_cast<int>((b - kGridYBase) / kCellH);
+                          static_cast<int>(std::ceil((r - ox) / kCellW)));
+        int r0 = static_cast<int>((b - oy) / kCellH);
         int r1 = std::min(kGridRows,
-                          static_cast<int>(std::ceil((t - kGridYBase) / kCellH)));
+                          static_cast<int>(std::ceil((t - oy) / kCellH)));
         for (int row = r0; row < r1; ++row) {
-            float cy0 = kGridYBase + row * kCellH;
+            float cy0 = oy + row * kCellH;
             float oh = std::min(t, cy0 + kCellH) - std::max(b, cy0);
             for (int col = c0; col < c1; ++col) {
-                float cx0 = px + col * kCellW;
+                float cx0 = ox + col * kCellW;
                 float ow = std::min(r, cx0 + kCellW) - std::max(l, cx0);
                 float& cell = cells[row * kGridCols + col];
                 cell = std::min(1.0f, cell + (ow * oh) / (kCellW * kCellH));
             }
         }
     }
+}
+
+inline void rasterize(const std::vector<gdcore::Box>& boxes, float px,
+                      float* cells) {
+    rasterizeAt(boxes, px, kGridYBase, cells);
 }
 
 } // namespace detail
@@ -261,6 +297,298 @@ inline void buildObs(const gdcore::PlayerState& s,
     std::memset(grid, 0, sizeof(float) * 2 * kGridDim);
     detail::rasterize(g.solids, s.x, grid);
     detail::rasterize(g.hazards, s.x, grid + kGridDim);
+}
+
+namespace detail {
+
+// The v5 "kind" code of a special (scalars 20 / 23), shared with v6's
+// geometry rows so the two layouts never disagree on a value.
+inline float specialKindCode(gdcore::SpecialKind k) {
+    switch (k) {
+        case gdcore::SpecialKind::YellowPad: return 1.0f;
+        case gdcore::SpecialKind::GravityPad: return -1.0f;
+        case gdcore::SpecialKind::GravityNormal: return 0.5f;
+        case gdcore::SpecialKind::GravityFlip: return -0.5f;
+        case gdcore::SpecialKind::YellowRing: return 0.25f;
+        case gdcore::SpecialKind::PinkPad: return 0.75f;
+        case gdcore::SpecialKind::PinkRing: return -0.25f;
+        case gdcore::SpecialKind::GravityRing: return -0.75f;
+        case gdcore::SpecialKind::SizeNormal: return 0.9f;
+        case gdcore::SpecialKind::SizeMini: return -0.9f;
+    }
+    return 0.0f;
+}
+
+// Mode portals share the interactive rows; codes distinct from every
+// special code above.
+inline float portalKindCode(gdcore::PortalMode m) {
+    switch (m) {
+        case gdcore::PortalMode::Cube: return 0.1f;
+        case gdcore::PortalMode::Ship: return 0.2f;
+        case gdcore::PortalMode::Ball: return 0.3f;
+        case gdcore::PortalMode::Ufo: return 0.4f;
+    }
+    return 0.0f;
+}
+
+struct GeomPick {
+    float d2 = 0.0f;
+    int order = 0;
+    const gdcore::Box* box = nullptr;
+    float kind = 0.0f;
+    float state = 0.0f;
+};
+
+// Squared distance between the player's box and `b` (0 when they overlap).
+inline float boxDist2(float pl, float pb, float pr, float pt,
+                      const gdcore::Box& b) {
+    float dx = std::max(0.0f, std::max(b.left - pr, pl - b.right));
+    float dy = std::max(0.0f, std::max(b.bottom - pt, pb - b.top));
+    return dx * dx + dy * dy;
+}
+
+// Keep the kGeomPerClass nearest picks, ordered by (distance, object
+// order): a plain insertion into a tiny sorted array.
+inline void pickInsert(GeomPick* arr, int& n, const GeomPick& p) {
+    int pos = n;
+    while (pos > 0 && (p.d2 < arr[pos - 1].d2 ||
+                       (p.d2 == arr[pos - 1].d2 && p.order < arr[pos - 1].order)))
+        --pos;
+    if (pos >= kGeomPerClass) return;
+    int last = std::min(n, kGeomPerClass - 1);
+    for (int i = last; i > pos; --i) arr[i] = arr[i - 1];
+    arr[pos] = p;
+    if (n < kGeomPerClass) ++n;
+}
+
+inline bool inWindow(const gdcore::Box& b, float x, float y) {
+    return b.right >= x + kGridXOffV6 && b.left < x + kGridXOffV6 + kLookahead &&
+           b.top >= y + kGridYOffV6 && b.bottom < y + kGridYOffV6 + kGridRows * kCellH;
+}
+
+inline void writeGeomRow(float* row, const GeomPick& p, float x, float y) {
+    if (!p.box) {
+        std::memset(row, 0, sizeof(float) * kGeomFloats);
+        return;
+    }
+    row[0] = 1.0f;
+    row[1] = (p.box->left - x) / kLookahead;
+    row[2] = (p.box->bottom - y) / 300.0f;
+    row[3] = (p.box->right - x) / kLookahead;
+    row[4] = (p.box->top - y) / 300.0f;
+    if (p.box->radius > 0.0f) {
+        row[5] = (p.box->cx - x) / kLookahead;
+        row[6] = (p.box->cy - y) / 300.0f;
+        row[7] = p.box->radius / 60.0f;
+    } else {
+        row[5] = row[6] = row[7] = 0.0f;
+    }
+    row[8] = p.kind;
+    row[9] = p.state;
+}
+
+inline bool ringTouching(const gdcore::PlayerState& s, int idx) {
+    for (int i = 0; i < s.nRingPrev; ++i) if (s.ringPrev[i] == idx) return true;
+    for (int i = 0; i < s.nRingNow; ++i) if (s.ringNow[i] == idx) return true;
+    return false;
+}
+
+} // namespace detail
+
+// Obs v6 builder (layout above). The scalar block starts with v5's 27
+// scalars verbatim (buildObs), so the two layouts share one definition of
+// every legacy feature.
+inline void buildObsV6(const gdcore::PlayerState& s,
+                       const gdcore::LevelGeometry& g,
+                       const gdcore::PhysicsConfig& c, float levelEndX,
+                       float* out) {
+    // Scalars 0-26: exactly v5's (built into a scratch row; the grid tail
+    // of that call is discarded).
+    {
+        float tmp[kObsDim];
+        buildObs(s, g, levelEndX, c.dx, tmp);
+        std::memcpy(out, tmp, sizeof(float) * kPlayerDim);
+    }
+    const float half = gdcore::playerHalf(s, c);
+    // 27/28: clearance to the floor / ceiling line the current mode snaps
+    // against (player center). Cube: the floor line (floorLine) and the
+    // kMaxGameplayY kill line; flying / ball: the portal-installed band.
+    float floorY, ceilY;
+    bool floorApplies, ceilApplies;
+    if (gdcore::flying(s) || s.ball) {
+        const float bandH = s.ship ? 300.0f
+                            : s.bird ? gdcore::ufo::kBandHeight
+                                     : gdcore::ball::kBandHeight;
+        floorY = s.bandFloor + half;
+        ceilY = s.bandFloor + bandH - half;
+        floorApplies = ceilApplies = true;
+    } else {
+        floorY = gdcore::floorLine(s, c);
+        ceilY = gdcore::kMaxGameplayY + (c.half - half);
+        // An upside-down cube only meets the floor line after the flip
+        // grace (pad::kFlipFloorGraceTicks); the kill line is not a snap.
+        floorApplies = !s.upsideDown ||
+                       s.sinceFlip >= gdcore::pad::kFlipFloorGraceTicks;
+        ceilApplies = false;
+    }
+    out[27] = std::max(-2.0f, std::min(2.0f, (s.y - floorY) / 300.0f));
+    out[28] = std::max(-2.0f, std::min(2.0f, (ceilY - s.y) / 300.0f));
+    out[29] = floorApplies ? 1.0f : 0.0f;
+    out[30] = ceilApplies ? 1.0f : 0.0f;
+    // 31: collision size — the CACHED rect's half extent (rectMini lags a
+    // size portal by one position write), 1 normal / 0.6 mini.
+    out[31] = half / c.half;
+    // 32: gravity-flip grace, 1 right after a flip -> 0 once it has run out.
+    out[32] = s.sinceFlip < gdcore::pad::kFlipFloorGraceTicks
+                  ? 1.0f - static_cast<float>(s.sinceFlip) /
+                               gdcore::pad::kFlipFloorGraceTicks
+                  : 0.0f;
+    // 33-35: landing-pattern snap memory (collidedWithObjectInternal tail):
+    // whether a previous landing is remembered, the remembered x offset,
+    // and where that object sits relative to the player now.
+    out[33] = s.hasPrevLand ? 1.0f : 0.0f;
+    out[34] = s.hasPrevLand ? static_cast<float>(s.landOffset) / 30.0f : 0.0f;
+    out[35] = s.hasPrevLand ? (s.prevLandX - s.x) / kLookahead : 0.0f;
+    // 36: the "one more tick above kMaxGameplayY kills" flag.
+    out[36] = s.overMaxY ? 1.0f : 0.0f;
+
+    // Geometry rows.
+    const float pl = s.x - half, pb = s.y - half, pr = s.x + half,
+                pt = s.y + half;
+    detail::GeomPick haz[kGeomPerClass], sol[kGeomPerClass],
+        act[kGeomPerClass];
+    int nh = 0, ns = 0, na = 0;
+    const float scanFrom = s.x + kGridXOffV6 - 66.0f;
+    const float scanTo = s.x + kGridXOffV6 + kLookahead;
+    {
+        auto it = std::lower_bound(
+            g.hazards.begin(), g.hazards.end(), scanFrom,
+            [](const gdcore::Box& b, float v) { return b.left < v; });
+        for (; it != g.hazards.end() && it->left < scanTo; ++it) {
+            if (!detail::inWindow(*it, s.x, s.y)) continue;
+            detail::GeomPick p;
+            p.d2 = detail::boxDist2(pl, pb, pr, pt, *it);
+            p.order = it->order;
+            p.box = &*it;
+            p.kind = it->radius > 0.0f ? -1.0f : 1.0f;
+            p.state = 0.0f;
+            detail::pickInsert(haz, nh, p);
+        }
+    }
+    {
+        auto it = std::lower_bound(
+            g.solids.begin(), g.solids.end(), scanFrom,
+            [](const gdcore::Box& b, float v) { return b.left < v; });
+        for (; it != g.solids.end() && it->left < scanTo; ++it) {
+            if (!detail::inWindow(*it, s.x, s.y)) continue;
+            detail::GeomPick p;
+            p.d2 = detail::boxDist2(pl, pb, pr, pt, *it);
+            p.order = it->order;
+            p.box = &*it;
+            p.kind = 1.0f;
+            // Contact: the boxes touch or overlap; -1 marks the object the
+            // landing-snap memory refers to.
+            const bool touching = p.d2 == 0.0f;
+            const bool remembered =
+                s.hasPrevLand &&
+                std::fabs(0.5f * (it->left + it->right) - s.prevLandX) < 0.01f &&
+                std::fabs(0.5f * (it->bottom + it->top) - s.prevLandY) < 0.01f;
+            p.state = remembered ? -1.0f : touching ? 1.0f : 0.0f;
+            detail::pickInsert(sol, ns, p);
+        }
+    }
+    {
+        auto it = std::lower_bound(
+            g.specials.begin(), g.specials.end(), scanFrom,
+            [](const gdcore::Special& e, float v) { return e.box.left < v; });
+        const int pressable = gdcore::pressableRing(s);
+        for (; it != g.specials.end() && it->box.left < scanTo; ++it) {
+            if (!detail::inWindow(it->box, s.x, s.y)) continue;
+            const int idx = static_cast<int>(it - g.specials.begin());
+            detail::GeomPick p;
+            p.d2 = detail::boxDist2(pl, pb, pr, pt, it->box);
+            p.order = it->box.order;
+            p.box = &it->box;
+            p.kind = detail::specialKindCode(it->kind);
+            // state: -1 = spent / no effect (one-shot already fired, or an
+            // idempotent portal the player already satisfies), 1 = a press
+            // now fires this ring, 0.5 = ring in the touching list, 0 =
+            // live and untouched.
+            float st = 0.0f;
+            switch (it->kind) {
+                case gdcore::SpecialKind::YellowPad:
+                case gdcore::SpecialKind::PinkPad:
+                case gdcore::SpecialKind::GravityPad:
+                    st = gdcore::specialDone(s, idx) ? -1.0f : 0.0f;
+                    break;
+                case gdcore::SpecialKind::YellowRing:
+                case gdcore::SpecialKind::PinkRing:
+                case gdcore::SpecialKind::GravityRing:
+                    st = gdcore::specialDone(s, idx) ? -1.0f
+                         : pressable == idx          ? 1.0f
+                         : detail::ringTouching(s, idx) ? 0.5f
+                                                        : 0.0f;
+                    break;
+                case gdcore::SpecialKind::GravityNormal:
+                    st = s.upsideDown ? 0.0f : -1.0f;
+                    break;
+                case gdcore::SpecialKind::GravityFlip:
+                    st = s.upsideDown ? -1.0f : 0.0f;
+                    break;
+                case gdcore::SpecialKind::SizeNormal:
+                    st = s.mini ? 0.0f : -1.0f;
+                    break;
+                case gdcore::SpecialKind::SizeMini:
+                    st = s.mini ? -1.0f : 0.0f;
+                    break;
+            }
+            p.state = st;
+            detail::pickInsert(act, na, p);
+        }
+        auto pit = std::lower_bound(
+            g.portals.begin(), g.portals.end(), scanFrom,
+            [](const gdcore::Portal& e, float v) { return e.box.left < v; });
+        for (; pit != g.portals.end() && pit->box.left < scanTo; ++pit) {
+            if (!detail::inWindow(pit->box, s.x, s.y)) continue;
+            detail::GeomPick p;
+            p.d2 = detail::boxDist2(pl, pb, pr, pt, pit->box);
+            p.order = pit->box.order;
+            p.box = &pit->box;
+            p.kind = detail::portalKindCode(pit->mode);
+            const bool same =
+                (pit->mode == gdcore::PortalMode::Ship && s.ship) ||
+                (pit->mode == gdcore::PortalMode::Ball && s.ball) ||
+                (pit->mode == gdcore::PortalMode::Ufo && s.bird) ||
+                (pit->mode == gdcore::PortalMode::Cube && !s.ship && !s.ball &&
+                 !s.bird);
+            p.state = same ? -1.0f : 0.0f;
+            detail::pickInsert(act, na, p);
+        }
+    }
+    float* rows = out + kPlayerDimV6;
+    for (int k = 0; k < kGeomPerClass; ++k) {
+        detail::writeGeomRow(rows + (0 * kGeomPerClass + k) * kGeomFloats,
+                             k < nh ? haz[k] : detail::GeomPick{}, s.x, s.y);
+        detail::writeGeomRow(rows + (1 * kGeomPerClass + k) * kGeomFloats,
+                             k < ns ? sol[k] : detail::GeomPick{}, s.x, s.y);
+        detail::writeGeomRow(rows + (2 * kGeomPerClass + k) * kGeomFloats,
+                             k < na ? act[k] : detail::GeomPick{}, s.x, s.y);
+    }
+
+    float* grid = out + kPlayerDimV6 + kGeomDim;
+    std::memset(grid, 0, sizeof(float) * 2 * kGridDim);
+    detail::rasterizeAt(g.solids, s.x + kGridXOffV6, s.y + kGridYOffV6, grid);
+    detail::rasterizeAt(g.hazards, s.x + kGridXOffV6, s.y + kGridYOffV6,
+                        grid + kGridDim);
+}
+
+// Dispatch on the layout version (gdenv_create's obs_version).
+inline void buildObsVersioned(int version, const gdcore::PlayerState& s,
+                              const gdcore::LevelGeometry& g,
+                              const gdcore::PhysicsConfig& c, float levelEndX,
+                              float* out) {
+    if (version == kObsVersionV6) buildObsV6(s, g, c, levelEndX, out);
+    else buildObs(s, g, levelEndX, c.dx, out);
 }
 
 } // namespace gdenv
