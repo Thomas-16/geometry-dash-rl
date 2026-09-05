@@ -34,7 +34,7 @@ Every trace must MATCH incl. death ticks, with no `[onground mismatches ...]` su
 | 9 | `... 9.txt ... traces/session16/attempt_*.csv traces/session17/attempt_*.csv traces/session1[789]/logger_attempt_0001.csv traces/session1[89]/attempt_0001.csv` |
 | 10 | `... 10.txt ... traces/session20/attempt_*.csv traces/session21/attempt_0001.csv traces/session22/attempt_0001.csv traces/session22/logger_attempt_0001.csv` |
 | 11 | `... 11.txt ... traces/session23/attempt_0001.csv traces/session23/logger_attempt_0001.csv` |
-| 12 | `... 12.txt ... traces/session24/logger_attempt_0001.csv` |
+| 12 | `... 12.txt ... traces/session24/logger_attempt_0001.csv traces/session25/attempt_0001.csv traces/session25/logger_attempt_0001.csv` |
 
 ## Architecture rules
 
