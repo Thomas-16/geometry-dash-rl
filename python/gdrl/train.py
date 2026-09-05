@@ -181,6 +181,24 @@ def parse_args():
     p.add_argument("--anchor-margin", type=float, default=2.0,
                    help="hinge margin (logits) the anchor holds on the "
                         "best det run's decisions")
+    # Stitched training. The deliverable is a hold sequence, and the sim is
+    # deterministic, so the best det run's holds up to its death are a
+    # certificate that never needs relearning. Every episode and every det
+    # eval starts from the certificate's state --stitch-back units before
+    # its end (the DLL replays the prefix into a snapshot); a det run that
+    # gets further extends the certificate (prefix + its own suffix), and
+    # the frontier moves with it. Without this, a 3300-decision prefix ate
+    # ~95% of Theory of Everything's rollout (frac_explore 0.03-0.08, ~0.3
+    # useful samples/update at the wall), the argmax prefix broke every
+    # ~30 updates, and demo BC could not be applied without flipping
+    # look-alike prefix decisions. Frontier episodes carry their prefix's
+    # tick count so traces/wins/solutions are still full from-x=0 holds.
+    p.add_argument("--stitch", type=int, default=1,
+                   help="1 = episodes and det evals start from the "
+                        "certificate frontier (best det run's state "
+                        "--stitch-back before its death); 0 = from x=0")
+    p.add_argument("--stitch-back", type=float, default=600.0,
+                   help="frontier start = best det x - this")
     p.add_argument("--det-rollback", type=float, default=0.5,
                    help="restore ckpt_best_det when det_x stays below this "
                         "fraction of best_det_x for 2 consecutive evals, "
@@ -214,10 +232,14 @@ class EpisodeRecorder:
 
     kMaxWins = 16  # wins are interchangeable certificates; cap the trace
 
-    def record(self, done: np.ndarray, info: dict):
+    def record(self, done: np.ndarray, info: dict, holds_of=None):
+        """holds_of(i) -> full from-x=0 holds of env i's finished episode
+        (stitched episodes prepend their certificate prefix); default =
+        the env's own record."""
         for i in np.nonzero(done)[0]:
-            ep = traces.Episode(self.env.last_episode_holds(int(i)),
-                                float(info["final_x"][i]),
+            holds = (self.env.last_episode_holds(int(i)) if holds_of is None
+                     else holds_of(int(i)))
+            ep = traces.Episode(holds, float(info["final_x"][i]),
                                 bool(info["won"][i]))
             self.completed.append(ep)
             if ep.won and len(self.wins) < self.kMaxWins:
@@ -257,7 +279,11 @@ class DetEvaluator:
     def busy(self) -> bool:
         return self.thread is not None and self.thread.is_alive()
 
-    def start(self, model, optimizer, update: int, extra: dict) -> None:
+    def start(self, model, optimizer, update: int, extra: dict,
+              blob: np.ndarray | None = None,
+              prefix: np.ndarray | None = None) -> None:
+        """blob/prefix: stitched start — the run begins from this state
+        snapshot and its reported holds are prefix + the run's own."""
         assert not self.busy()
         self.snapshot.load_state_dict(model.state_dict())
         self.snapshot.logit_bound = model.logit_bound
@@ -272,20 +298,27 @@ class DetEvaluator:
         info = {"update": update, "model": model_state, "optimizer": opt_state,
                 "logit_bound": model.logit_bound, **extra}
         self.result = None
-        self.thread = threading.Thread(target=self._run, args=(info,),
-                                       daemon=True)
+        self.thread = threading.Thread(
+            target=self._run,
+            args=(info, blob, np.zeros(0, np.uint8) if prefix is None
+                  else np.asarray(prefix, np.uint8)),
+            daemon=True)
         self.thread.start()
 
-    def _run(self, info: dict) -> None:
+    def _run(self, info: dict, blob, prefix: np.ndarray) -> None:
         env, dev, model = self.env, self.device, self.snapshot
-        obs_d = torch.as_tensor(env.reset(), device=dev)
+        env.reset()
+        if blob is not None:
+            env.set_state(0, blob)
+        obs_d = torch.as_tensor(env._obs.copy(), device=dev)
         while True:
             with torch.no_grad(), autocast_ctx(dev, self.amp):
                 logit, _ = model(obs_d)
             a = (logit > 0).to(torch.uint8).cpu().numpy()
             next_d, _, dterm, dtrunc, dinfo = env.step(a)
             if dterm[0] or dtrunc[0]:
-                info["holds"] = env.last_episode_holds(0)
+                info["holds"] = np.concatenate(
+                    [prefix, env.last_episode_holds(0)])
                 self.result = (float(dinfo["final_x"][0]),
                                bool(dinfo["won"][0]), info)
                 return
@@ -698,6 +731,63 @@ def main():
     print(f"explore: banked {n_banked} states, deepest x {deep0:.0f} "
           f"({100 * deep0 / env.end_x:.1f}% of level)")
 
+    # Stitched frontier (see --stitch). The certificate is anchor_holds (the
+    # best det run's from-x=0 holds); the frontier is its state
+    # --stitch-back before anchor_x. Frontier episodes remember their
+    # prefix length: a later certificate always extends the prefix it was
+    # cut from (only the part past the frontier is ever replaced), so
+    # anchor_holds[:prefix_ticks[i]] + the env's own record is the full run.
+    front_blob: np.ndarray | None = None
+    front_tick = 0
+    front_x = 0.0
+    prefix_ticks = np.zeros(env.n_envs, np.int64)
+    spawn_blob: list = [None] * env.n_envs
+
+    def set_frontier() -> bool:
+        """Recompute the frontier from the certificate; True if it moved."""
+        nonlocal front_blob, front_tick, front_x
+        x0 = anchor_x - args.stitch_back
+        if not args.stitch or len(anchor_holds) == 0 or x0 <= 0.0:
+            moved = front_blob is not None
+            front_blob, front_tick, front_x = None, 0, 0.0
+            return moved
+        blob = scout.trace_states(anchor_holds, [x0])[0]
+        if blob is None:
+            return False
+        # Prefix length = ticks consumed before the first decision boundary
+        # with x >= x0 (trace_states' rule), read off a replay rather than
+        # the blob's layout.
+        obs, _, _, ticks, n_steps, _, _ = scout.replay([anchor_holds], None)
+        xs = obs[0, :n_steps[0], 5] * env.end_x
+        hit = np.nonzero(xs >= x0)[0]
+        if len(hit) == 0:
+            return False
+        moved = front_blob is None or abs(front_x - x0) > 0.5
+        front_blob, front_x = blob, x0
+        front_tick = int(ticks[0, :hit[0]].sum())
+        return moved
+
+    def spawn_frontier(i: int) -> None:
+        """Start env i a new certificate-candidate episode: from the
+        frontier snapshot, or x=0 without one."""
+        if front_blob is not None:
+            env.set_state(i, front_blob)
+            prefix_ticks[i] = front_tick
+            spawn_blob[i] = front_blob
+        else:
+            env.reset_env(i)
+            prefix_ticks[i] = 0
+            spawn_blob[i] = None
+        from_start[i] = True
+        respawn_x[i] = -1.0
+
+    if set_frontier():
+        for i in range(env.n_envs):
+            spawn_frontier(i)
+    if args.stitch:
+        print(f"stitch: frontier x {front_x:.0f} (certificate to "
+              f"{anchor_x:.0f}, prefix {front_tick} ticks)")
+
     def save_ckpt(path, update_done: int, progress: float, mean_x: float,
                   model_state=None, opt_state=None, logit_bound=None):
         torch.save({"model": model_state or model.state_dict(),
@@ -748,7 +838,10 @@ def main():
             # the explore zone — measured: xpl 0.00 -> 0.76, prefix deaths
             # x65/update, two collapse rollbacks. The anchor repairs the
             # flip; the det rollback below is the backstop.
-            explore_lo = (max(det_x_latest, anchor_x) - args.explore_margin
+            # Stitched: nothing spawns before the frontier, so it is all
+            # explore zone.
+            explore_lo = (front_x if args.stitch else
+                          max(det_x_latest, anchor_x) - args.explore_margin
                           if args.explore_margin >= 0 else -1.0)
             for step_i in range(cfg.rollout_steps):
                 # The env's obs buffer (pinned) is the source of truth: H2D into
@@ -818,10 +911,19 @@ def main():
 
                 # Progress stats and replayable traces only from x=0 episodes.
                 done_fs = done & from_start
-                n_before = len(recorder.completed)
-                recorder.record(done_fs, info)
-                for ep in recorder.completed[n_before:]:
-                    sil_buf.add(ep.holds, ep.final_x, ep.won)
+                if done_fs.any():
+                    # The env records only the suffix after its snapshot
+                    # spawn; traces/wins get prefix + suffix, SIL replays
+                    # the suffix from the spawn blob.
+                    suffixes = {int(i): env.last_episode_holds(int(i))
+                                for i in np.nonzero(done_fs)[0]}
+                    recorder.record(
+                        done_fs, info,
+                        lambda i: np.concatenate(
+                            [anchor_holds[:prefix_ticks[i]], suffixes[i]]))
+                    for i, sfx in suffixes.items():
+                        sil_buf.add(sfx, float(info["final_x"][i]),
+                                    bool(info["won"][i]), spawn_blob[i])
                 if done_fs.any():
                     fx = info["final_x"][done_fs]
                     window_final_x.extend(fx.tolist())
@@ -848,12 +950,16 @@ def main():
                 done_idx = np.nonzero(done)[0]
                 if len(done_idx):
                     # Per-step (not per-death) respawn candidate sets.
+                    # Stitched: states behind the frontier are prefix
+                    # territory — never respawn there.
+                    b_lo = int(front_x // kBucket)
                     learnable = [
                         b for b in bank
-                        if respawn_attempts.get(b, 0.0) >= 8.0
+                        if b >= b_lo
+                        and respawn_attempts.get(b, 0.0) >= 8.0
                         and 0.1 <= (respawn_passes.get(b, 0.0)
                                     / respawn_attempts[b]) <= 0.8]
-                    buckets = sorted(bank)
+                    buckets = sorted(b for b in bank if b >= b_lo)
                 for i in done_idx:
                     if respawn_x[i] >= 0.0:  # a respawned episode just ended
                         b = int(respawn_x[i] // kBucket)
@@ -864,14 +970,15 @@ def main():
                     if not won_i[i] and not burst_i[i]:
                         recent_deaths.append(float(final_x_i[i]))
                         window_deaths.append(float(final_x_i[i]))
-                    if bank and rng.random() < respawn_prob:
+                    if bank and buckets and rng.random() < respawn_prob:
                         picked = None
                         u = rng.random()
                         if (det_x_latest > 700.0
                                 and rng.random() < args.frontier_respawn):
                             # Frontier: just before where the argmax policy
                             # dies (see --frontier-respawn).
-                            picked = bank_pick(det_x_latest - 700.0,
+                            picked = bank_pick(max(det_x_latest - 700.0,
+                                                   front_x),
                                                det_x_latest - 50.0)
                         if picked is None and u < 0.5 and learnable:
                             # Learnable zone: spawn buckets the policy passes
@@ -886,7 +993,8 @@ def main():
                             # before pass-rate stats exist for them.
                             dx = recent_deaths[int(rng.integers(
                                 len(recent_deaths)))]
-                            picked = bank_pick(dx - 450.0, dx - 50.0)
+                            picked = bank_pick(max(dx - 450.0, front_x),
+                                               dx - 50.0)
                         if picked is None:
                             # Uniform over the bank: retention practice.
                             blobs = bank[buckets[int(rng.integers(len(buckets)))]]
@@ -895,10 +1003,10 @@ def main():
                         from_start[i] = False
                         respawn_x[i] = picked[0]
                     else:
-                        if burst_i[i]:  # alive in the DLL: reset it ourselves
-                            env.reset_env(int(i))
-                        from_start[i] = True
-                        respawn_x[i] = -1.0
+                        # Certificate-candidate episode from the frontier
+                        # (or x=0). A burst env is still alive in the DLL;
+                        # set_state / reset_env restart it either way.
+                        spawn_frontier(int(i))
 
                 step_ticks = int(info["ticks"].sum())
                 global_ticks += step_ticks
@@ -941,7 +1049,9 @@ def main():
                     sil_env, sil_buf, args.sil_episodes, rng,
                     cfg.max_grad_norm, k_demos=args.sil_demos,
                     anchor=(anchor_holds, anchor_x),
-                    anchor_x_lo=anchor_x - args.explore_margin))
+                    # Stitched: the prefix is frozen holds, nothing to pin.
+                    anchor_x_lo=(-1.0 if args.stitch
+                                 else anchor_x - args.explore_margin)))
             sync()
             t_sil = time.perf_counter() - t0
             for d in (respawn_attempts, respawn_passes):
@@ -966,7 +1076,8 @@ def main():
             det_results = [r for r in (det.poll(wait=det_due),) if r is not None]
             if det_due:
                 det.start(model, algo.optimizer, update + 1,
-                          {"progress": progress, "mean_x": mean_x})
+                          {"progress": progress, "mean_x": mean_x},
+                          blob=front_blob, prefix=anchor_holds[:front_tick])
                 if update + 1 == args.updates:  # nothing left to overlap with
                     det_results.append(det.poll(wait=True))
             t_det_wait = time.perf_counter() - t0
@@ -1009,6 +1120,31 @@ def main():
                 # Demos the frontier has moved past (same reasoning).
                 sil_buf.prune_demos(max(best_det_x, anchor_x)
                                     - args.explore_margin)
+            front_str = ""
+            if det_results and set_frontier():
+                # The certificate grew: episodes/det evals now start from
+                # its new frontier; episodes that ended behind it are
+                # prefix territory.
+                n_drop = sil_buf.drop_before(front_x)
+                front_str = (f" | FRONTIER -> {front_x:.0f} (certificate "
+                             f"{anchor_x:.0f}, {len(anchor_holds)} ticks"
+                             f"{f', {n_drop} sil eps dropped' if n_drop else ''})")
+            for dx_, dwin_, dsnap in det_results:
+                if dwin_ and "holds" in dsnap:
+                    # A det win from the frontier is a full certificate:
+                    # write it now (eval.py would only re-derive it).
+                    from .eval import holds_to_ranges, level_id_of
+                    sol = {"tps": traces.TPS,
+                           "level_id": level_id_of(args.level),
+                           "level_end_x": float(env.end_x),
+                           "n_ticks": int(len(dsnap["holds"])),
+                           "deterministic_policy": True,
+                           "holds": holds_to_ranges(
+                               np.asarray(dsnap["holds"], np.uint8))}
+                    (run_dir / "solution.json").write_text(
+                        json.dumps(sol, indent=2))
+                    front_str += (f" | WROTE {run_dir / 'solution.json'} "
+                                  f"({sol['n_ticks']} ticks)")
             sol_str = ""
             sol_res = solver.poll() if solver is not None else None
             if sol_res is not None:
@@ -1080,6 +1216,7 @@ def main():
                     tb.add_scalar(k, v, global_ticks)
                 if det_x >= 0:
                     tb.add_scalar("det_x", det_x, global_ticks)
+                tb.add_scalar("front_x", front_x, global_ticks)
                 if window_deaths:
                     tb.add_histogram("death_x", np.asarray(window_deaths),
                                      global_ticks)
@@ -1147,7 +1284,7 @@ def main():
                   f"ent {stats['entropy']:.3f}{det_str}{die_str}"
                   f" | xpl {frac_explore:.2f}"
                   f"{f' | demos {len(sil_buf.demos)}' if sil_buf.demos else ''}"
-                  f"{sol_str}"
+                  f"{sol_str}{front_str}"
                   f" | {t_roll:.2f}s roll ({t_roll_gpu:.2f} gpu {t_roll_env:.2f} "
                   f"env {t_roll_misc:.2f} misc) {t_update:.2f}s upd"
                   f"{f' {t_sil:.2f}s sil' if sil_env is not None else ''}"

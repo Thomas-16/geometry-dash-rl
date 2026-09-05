@@ -63,8 +63,10 @@ class SILBuffer:
         self.cap_wins = cap_wins
         self.cap_deaths = cap_deaths
         self.cap_demos = cap_demos
-        self.wins: list[tuple[np.ndarray, float]] = []    # (holds, final_x)
-        self.deaths: list[tuple[np.ndarray, float]] = []
+        # (holds, final_x, start blob or None). Stitched training records
+        # frontier episodes as (suffix holds, frontier blob); None = x=0.
+        self.wins: list[tuple[np.ndarray, float, np.ndarray | None]] = []
+        self.deaths: list[tuple[np.ndarray, float, np.ndarray | None]] = []
         # (start blob, holds, start_x, reach_x); FIFO — a wall's demos age
         # out once the policy has moved on
         self.demos: list[tuple[np.ndarray, np.ndarray, float, float]] = []
@@ -74,28 +76,44 @@ class SILBuffer:
         return len(self.wins) + len(self.deaths)
 
     @staticmethod
-    def _key(holds: np.ndarray) -> bytes:
-        return np.asarray(holds, np.uint8).tobytes()
+    def _key(holds: np.ndarray, blob: np.ndarray | None = None) -> bytes:
+        k = np.asarray(holds, np.uint8).tobytes()
+        return k if blob is None else np.asarray(blob, np.uint8).tobytes() + k
 
-    def add(self, holds: np.ndarray, final_x: float, won: bool) -> None:
+    def add(self, holds: np.ndarray, final_x: float, won: bool,
+            blob: np.ndarray | None = None) -> None:
         if len(holds) == 0:
             return
         # Dedupe identical input sequences (deterministic sim -> identical
         # trajectories add nothing): O(1) set lookup on the raw bytes.
-        key = self._key(holds)
+        key = self._key(holds, blob)
         if key in self._keys:
             return
         pool = self.wins if won else self.deaths
         cap = self.cap_wins if won else self.cap_deaths
-        pool.append((np.asarray(holds, np.uint8), float(final_x)))
+        pool.append((np.asarray(holds, np.uint8), float(final_x),
+                     None if blob is None else np.asarray(blob, np.uint8)))
         self._keys.add(key)
         if len(pool) > cap:
             # Wins are interchangeable certificates: FIFO. Deaths: keep the
             # deepest (they carry the most not-yet-mastered level suffix).
             if not won:
                 pool.sort(key=lambda t: t[1])
-            dropped, _ = pool.pop(0)
-            self._keys.discard(self._key(dropped))
+            dropped, _, dblob = pool.pop(0)
+            self._keys.discard(self._key(dropped, dblob))
+
+    def drop_before(self, min_final_x: float) -> int:
+        """Drop episodes that ended before min_final_x (stitched training:
+        once the certificate's frontier moved past them, their decisions
+        are prefix territory the policy never visits again)."""
+        n0 = len(self)
+        self.wins = [t for t in self.wins if t[1] >= min_final_x]
+        self.deaths = [t for t in self.deaths if t[1] >= min_final_x]
+        if len(self) != n0:
+            self._keys = {k for k in self._keys if k.startswith(b"demo")}
+            self._keys |= {self._key(h, b) for h, _, b in
+                           self.wins + self.deaths}
+        return n0 - len(self)
 
     def add_demo(self, blob: np.ndarray, holds: np.ndarray, start_x: float,
                  reach_x: float) -> bool:
@@ -128,16 +146,17 @@ class SILBuffer:
                            for b, h, _, _ in self.demos}
         return n
 
-    def sample(self, k: int, rng: np.random.Generator) -> list[np.ndarray]:
-        """Up to k episodes, wins weighted 3x."""
-        items = [(h, 3.0) for h, _ in self.wins] + \
-                [(h, 1.0) for h, _ in self.deaths]
+    def sample(self, k: int, rng: np.random.Generator
+               ) -> list[tuple[np.ndarray, np.ndarray | None]]:
+        """Up to k (holds, start blob) episodes, wins weighted 3x."""
+        items = [(h, b, 3.0) for h, _, b in self.wins] + \
+                [(h, b, 1.0) for h, _, b in self.deaths]
         if not items:
             return []
-        w = np.array([t[1] for t in items])
+        w = np.array([t[2] for t in items])
         idx = rng.choice(len(items), min(k, len(items)), replace=False,
                          p=w / w.sum())
-        return [items[i][0] for i in idx]
+        return [(items[i][0], items[i][1]) for i in idx]
 
     def sample_demos(self, k: int, rng: np.random.Generator):
         """Up to k demo segments, newest weighted up (the current wall)."""
@@ -152,10 +171,13 @@ class SILBuffer:
         return {"wins": self.wins, "deaths": self.deaths, "demos": self.demos}
 
     def load_state_dict(self, d: dict) -> None:
-        self.wins = list(d.get("wins", []))
-        self.deaths = list(d.get("deaths", []))
+        # Pre-stitch checkpoints stored (holds, final_x): from-start episodes.
+        self.wins = [tuple(t) if len(t) == 3 else (t[0], t[1], None)
+                     for t in d.get("wins", [])]
+        self.deaths = [tuple(t) if len(t) == 3 else (t[0], t[1], None)
+                       for t in d.get("deaths", [])]
         self.demos = list(d.get("demos", []))
-        self._keys = {self._key(h) for h, _ in self.wins + self.deaths}
+        self._keys = {self._key(h, b) for h, _, b in self.wins + self.deaths}
         self._keys |= {b"demo" + b.tobytes() + self._key(h)
                        for b, h, _, _ in self.demos}
 
@@ -225,8 +247,8 @@ class SIL:
         demos = buffer.sample_demos(k_demos, rng)
         use_anchor = (anchor is not None and self.anchor_coef > 0
                       and anchor_x_lo > 0 and len(anchor[0]) > 0)
-        holds = list(episodes) + [h for _, h, _, _ in demos]
-        blobs = [None] * len(episodes) + [b for b, _, _, _ in demos]
+        holds = [h for h, _ in episodes] + [h for _, h, _, _ in demos]
+        blobs = [b for _, b in episodes] + [b for b, _, _, _ in demos]
         n_main = len(holds)
         if use_anchor:
             holds.append(anchor[0])
@@ -235,7 +257,7 @@ class SIL:
             return stats
         assert len(holds) <= env.n_envs, "sil env handle too small"
         obs, acts, rews, ticks, n_steps, final_obs, ends = env.replay(
-            holds, blobs if demos else None)
+            holds, blobs if any(b is not None for b in blobs) else None)
         # Bootstrap for streams that end alive (demo segments; a from-start
         # episode always ends terminal).
         boot = np.zeros(len(holds), np.float32)

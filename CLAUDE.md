@@ -60,6 +60,7 @@ Every trace must MATCH incl. death ticks, with no `[onground mismatches ...]` su
 - Hyperparameter defaults live in `PPOConfig` (`python/gdrl/ppo.py`); train.py CLI and `Gui::TrainForm` mirror them — never a second default.
 - Perf contract: trunks bf16 autocast + channels_last; heads/logit bound/losses stay fp32. Compare with `python -m gdrl.bench --compare <baseline.json>`; use `samples_s`/`dec/s`, never `ticks/s`.
 - A run trained before a sim fix that changes reachable states is poisoned (SIL buffer + respawn bank) — start fresh, don't `--resume`.
+- **Stitched training is the default** (`--stitch 1`): the best det run's holds are the certificate; every episode and det eval starts from its state `--stitch-back` (600) before its end, a det run that gets further extends it, and the frontier follows. Frontier episodes carry `prefix_ticks` so traces/wins/`solution.json` are full from-x=0 holds; SIL stores (suffix, spawn blob). A det WIN writes `solution.json` from the trainer; `gdrl.eval` starts from the checkpoint's frontier (`--from-start` to override). `--stitch 0` = the old from-x=0 regime.
 
 ## Geode mods (mod/ = trace logger, mod_replay/ = replayer)
 

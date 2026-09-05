@@ -54,6 +54,9 @@ def main():
     p.add_argument("--ticks-per-action", type=int, default=4)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available()
                    else "cpu")
+    p.add_argument("--from-start", action="store_true",
+                   help="ignore a stitched checkpoint's certificate and "
+                        "run the policy from x=0")
     p.add_argument("--amp", choices=AMP_MODES, default=None,
                    help="trunk precision; default = what the checkpoint's "
                         "run trained with")
@@ -85,7 +88,31 @@ def main():
         print(f"checkpoint obs migration: {note}")
     model.eval()
 
-    obs = torch.as_tensor(env.reset(), device=device)
+    env.reset()
+    # Stitched checkpoints (train.py --stitch): the policy was trained from
+    # the certificate frontier, so evaluate it from there and report full
+    # from-x=0 holds (certificate prefix + the policy's own suffix).
+    prefix = np.zeros(0, np.uint8)
+    cfgd = ckpt.get("config", {})
+    anchor = np.asarray(ckpt.get("anchor_holds", []), np.uint8)
+    x0 = float(ckpt.get("anchor_x", 0.0)) - float(cfgd.get("stitch_back",
+                                                          600.0))
+    if cfgd.get("stitch", 0) and len(anchor) and x0 > 0 \
+            and not args.from_start:
+        blob = env.trace_states(anchor, [x0])[0]
+        if blob is not None:
+            # Prefix length from a replay (same first-boundary rule as
+            # trace_states), not the blob's byte layout.
+            robs, _, _, rticks, rn, _, _ = env.replay([anchor], None)
+            hit = np.nonzero(robs[0, :rn[0], 5] * env.end_x >= x0)[0]
+            tick = int(rticks[0, :hit[0]].sum())
+            prefix = anchor[:tick]
+            for i in range(n):
+                env.set_state(i, blob)
+            print(f"stitched: starting from the certificate frontier "
+                  f"x {x0:.0f} (prefix {tick} ticks, certificate to "
+                  f"{ckpt.get('anchor_x', 0.0):.0f})")
+    obs = torch.as_tensor(env._obs.copy(), device=device)
     episodes: list[traces.Episode | None] = [None] * n
     while any(e is None for e in episodes):
         with torch.no_grad(), autocast_ctx(device, amp):
@@ -97,9 +124,9 @@ def main():
         done = (term | trunc).astype(bool)
         for i in np.nonzero(done)[0]:
             if episodes[i] is None:
-                episodes[i] = traces.Episode(env.last_episode_holds(int(i)),
-                                             float(info["final_x"][i]),
-                                             bool(info["won"][i]))
+                episodes[i] = traces.Episode(
+                    np.concatenate([prefix, env.last_episode_holds(int(i))]),
+                    float(info["final_x"][i]), bool(info["won"][i]))
         obs = torch.as_tensor(next_obs, device=device)
 
     eps: list[traces.Episode] = episodes  # type: ignore
